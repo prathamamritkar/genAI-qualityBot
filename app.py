@@ -361,91 +361,68 @@ def competitive_transcribe(audio_path: str, file_size_bytes: int) -> tuple[str, 
 # SECTION 4 — INSIGHT DISTILLATION (unchanged logic, preserved fully)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_insight(text: str, content_type: str = "interaction") -> str:
-    """Generate concise insight distillation — Groq primary, Deepgram fallback."""
+def generate_quality_audit(text: str, content_type: str = "interaction") -> dict:
+    """
+    Generate an enterprise-grade Quality Assurance Audit using Groq (Llama-3.3-70b-versatile).
+    Strict JSON output enforced. Evaluates Empathy, Compliance, CSAT, Resolution, and Agent Quality.
+    """
+    if not groq_client:
+        raise RuntimeError("Groq API client not configured. Required for QA Auditing.")
 
-    # Attempt 1: Groq (Llama-3.3-70b-versatile)
-    if groq_client:
-        try:
-            print(f"--- [Distillation] Groq Llama ({content_type}) ---")
-            MODEL_ID   = "llama-3.3-70b-versatile"
-            CHUNK_SIZE = 100_000  # ~25k tokens — safe margin
+    print(f"--- [QA Audit] Groq Llama ({content_type}) ---")
+    MODEL_ID = "llama-3.3-70b-versatile"
 
-            def _groq_complete(input_text: str) -> str:
-                prompt = (
-                    f"You are a customer service analyst. Provide a concise one-line summary "
-                    f"of this {content_type}. Focus on the main topic, customer concern, or outcome.\n\n"
-                    f"{content_type.capitalize()}: {input_text}\n\nOne-line summary:"
-                )
-                resp = groq_client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": "You are a helpful assistant that creates concise one-line summaries of customer interactions."},
-                        {"role": "user",   "content": prompt},
-                    ],
-                    model=MODEL_ID,
-                    temperature=0.7,
-                    max_tokens=150,
-                )
-                return resp.choices[0].message.content.strip()
+    system_prompt = (
+        "You are an expert Principal AI QA Auditor evaluating a customer support interaction. "
+        "Analyze the transcript carefully. Your task is to extract emotional states and evaluate the agent strictly "
+        "across core pillars: Empathy, Compliance, and Issue Resolution.\n\n"
+        "You MUST output exactly in JSON format, adhering to this schema:\n"
+        "{\n"
+        '  "thought_process": "Brief step-by-step reasoning of the interaction",\n'
+        '  "emotion_timeline": [{"speaker": "...", "turn": 1, "emotion": "Angry/Frustrated/Neutral/Happy"}],\n'
+        '  "empathy_score": <int 1-10>,\n'
+        '  "compliance_status": "Pass" | "Fail" | "Partial",\n'
+        '  "resolution_status": "Resolved" | "Unresolved" | "Escalated",\n'
+        '  "csat_score": <int 1-10>,\n'
+        '  "efficiency_score": <int 1-10>,\n'
+        '  "violations": ["List of protocol violations, empty if none"],\n'
+        '  "suggestions": ["Actionable feedback for the agent"],\n'
+        '  "summary": "One-line interaction summary"\n'
+        "}\n\n"
+        "Be highly critical but fair. Default to 'Fail' for compliance if agent ignores security/policy. "
+        "Ensure the JSON is perfectly valid."
+    )
 
-            if len(text) <= CHUNK_SIZE:
-                return _groq_complete(text)
+    user_prompt = f"Evaluate this {content_type}:\n\n{text}"
 
-            # Chunked processing for long transcripts
-            print(f"[Distillation] Text {len(text)} chars — chunking...")
-            chunks   = [text[i:i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
-            summaries = []
-            for i, chunk in enumerate(chunks):
-                print(f"[Distillation] Chunk {i+1}/{len(chunks)}")
-                try:
-                    summaries.append(_groq_complete(chunk))
-                except Exception as e:
-                    print(f"[Distillation] Chunk {i+1} failed: {e}")
-                    summaries.append("[chunk failed]")
-
-            final_prompt = (
-                f"You are a lead analyst. Synthesize these partial summaries of a long {content_type} "
-                f"into one cohesive line.\n\nPartial Summaries:\n"
-                + "\n".join(summaries)
-                + "\n\nFinal One-line summary:"
-            )
-            final = groq_client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": "You consolidate multiple summaries into one concise insight."},
-                    {"role": "user",   "content": final_prompt},
-                ],
-                model=MODEL_ID,
-                temperature=0.7,
-                max_tokens=200,
-            )
-            return final.choices[0].message.content.strip()
-
-        except Exception as e:
-            print(f"⚠️  [Groq Distillation] {e}")
-
-    # Attempt 2: Deepgram Text Intelligence (fallback)
-    if deepgram_client:
-        try:
-            print("--- [Distillation] Deepgram Text Intelligence ---")
-            if len(text.split()) < 10:
-                return text.strip()
-
-            response = deepgram_client.read.v("1").analyze(
-                {"buffer": text},
-                {"summarize": True, "language": "en"},
-            )
-            if hasattr(response, 'results'):
-                r = response.results
-                if hasattr(r, 'summary') and r.summary:
-                    return r.summary.short
-                if hasattr(r, 'channels') and r.channels:
-                    alt = r.channels[0].alternatives[0]
-                    if hasattr(alt, 'summaries') and alt.summaries:
-                        return alt.summaries[0].summary
-        except Exception as e:
-            print(f"⚠️  [Deepgram Distillation] {e}")
-
-    raise RuntimeError("All distillation engines failed or are unconfigured.")
+    try:
+        resp = groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            model=MODEL_ID,
+            temperature=0.3,
+            response_format={"type": "json_object"},
+            max_tokens=1024,
+        )
+        content = resp.choices[0].message.content.strip()
+        return json.loads(content)
+    except Exception as e:
+        print(f"⚠️  [Groq QA Audit Failed] {e}")
+        # Graceful fallback JSON if the LLM fails to parse or errors out
+        return {
+            "thought_process": "Error evaluating transcript.",
+            "emotion_timeline": [],
+            "empathy_score": 0,
+            "compliance_status": "Fail",
+            "resolution_status": "Unresolved",
+            "csat_score": 0,
+            "efficiency_score": 0,
+            "violations": ["System error during evaluation"],
+            "suggestions": ["Retry the audit API call"],
+            "summary": "Audit failed due to system error."
+        }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 5 — FILE PARSING (unchanged)
@@ -482,12 +459,12 @@ def process_chat():
         if not chat_text:
             return jsonify({'error': 'No content provided'}), 400
 
-        summary = generate_insight(chat_text, "interaction")
+        audit = generate_quality_audit(chat_text, "interaction")
         return jsonify({
             'success':       True,
             'type':          'chat',
             'original_text': chat_text,
-            'summary':       summary,
+            'audit':         audit,
             'timestamp':     datetime.utcnow().isoformat() + 'Z',
         })
     except Exception as e:
@@ -524,12 +501,12 @@ def process_file():
         if not text:
             return jsonify({'error': 'Could not extract text from file'}), 400
 
-        summary = generate_insight(text, "document")
+        audit = generate_quality_audit(text, "document")
         return jsonify({
             'success':       True,
             'type':          'chat',
             'original_text': text,
-            'summary':       summary,
+            'audit':         audit,
             'timestamp':     datetime.utcnow().isoformat() + 'Z',
         })
     except Exception as e:
@@ -583,14 +560,14 @@ def process_call():
                 pass
 
         # ── Distillation ───────────────────────────────────────────────────
-        print("[process-call] Distilling insight...")
-        summary = generate_insight(transcription, "voice capture")
+        print("[process-call] Generating QA Audit...")
+        audit = generate_quality_audit(transcription, "voice capture")
 
         return jsonify({
             'success':       True,
             'type':          'call',
             'transcription': transcription,
-            'summary':       summary,
+            'audit':         audit,
             'source_node':   source_node,   # "hf_space" | "api_chain"
             'timestamp':     datetime.utcnow().isoformat() + 'Z',
         })
