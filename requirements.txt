@@ -1,8 +1,21 @@
+# ── Vercel / Flask backend ────────────────────────────────────────────────────
 Flask==3.1.3
 flask-cors==6.0.2
 python-dotenv==1.2.1
+werkzeug>=3.1.0
+
+# ── Transcription & LLM APIs ──────────────────────────────────────────────────
 groq==1.0.0
-PyPDF2==3.0.1
 deepgram-sdk==6.0.0rc2
 elevenlabs==2.36.1
+
+# ── Document parsing ──────────────────────────────────────────────────────────
+PyPDF2==3.0.1
+
+# ── Data validation ───────────────────────────────────────────────────────────
 pydantic==2.12.5
+
+# ── HuggingFace Space client (competitive execution node) ────────────────────
+# Allows the Flask backend to call your privately-hosted HF Gradio Space.
+# Install: pip install gradio_client
+gradio_client>=1.3.0

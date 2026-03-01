@@ -26,3 +26,7 @@ uploads/
 # OS
 .DS_Store
 Thumbs.db
+
+# HuggingFace Space — separate git repo, not a submodule of this project
+hf_space/.git/
+hf_space/genAI-qualityBot/
