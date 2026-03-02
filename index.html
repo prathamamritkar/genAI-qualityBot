@@ -274,17 +274,12 @@
                 <div class="m3-spinner"></div>
                 <p id="loader-text" class="loader-msg">Analyzing interaction...</p>
 
-                <!-- Transcribe Now panel — shown only during HF Space transcription -->
-                <div class="transcribe-now-panel" id="transcribe-now-panel" hidden>
-                    <div class="tnp-node-badge">
-                        <span class="material-symbols-rounded">hub</span>
-                        <span id="tnp-node-label">HF Space processing...</span>
-                    </div>
-                    <p class="tnp-hint" id="tnp-hint">HF Space acoustic diarization can take 30–90 s. Click below to
-                        start the API chain simultaneously — first result wins.</p>
-                    <button class="btn-primary" id="transcribe-now-btn" type="button" disabled>
+                <!-- Transcribe Now fallback — shown seamlessly alongside the loader during slow processing -->
+                <div class="tnp-minimal-wrapper" id="transcribe-now-panel" hidden>
+                    <span id="tnp-hint" hidden></span>
+                    <button class="btn-fast-track" id="transcribe-now-btn" type="button" disabled>
                         <span class="material-symbols-rounded">bolt</span>
-                        <span id="transcribe-now-label">Transcribe Now</span>
+                        <span id="transcribe-now-label">Fast Track</span>
                     </button>
                     <p class="tnp-status" id="tnp-status" hidden></p>
                 </div>

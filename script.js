@@ -271,7 +271,7 @@ async function processVoiceSignal() {
     UI.tnp.panel.hidden = true;
     UI.tnp.btn.disabled = true;
     UI.tnp.status.hidden = true;
-    UI.tnp.hint.innerHTML = 'HF Space acoustic diarization can take 30–90 s. Click below to start the API chain simultaneously — first result wins.';
+    UI.tnp.hint.textContent = ''; // Hidden in UI, erased for safety
 
     try {
         const formData = new FormData();
@@ -289,10 +289,9 @@ async function processVoiceSignal() {
                 isFastTracked = true;
                 UI.tnp.btn.disabled = true;
                 UI.tnp.status.hidden = false;
-                UI.tnp.status.textContent = 'Triggering Groq Whisper API...';
+                UI.tnp.status.textContent = 'Engaging priority queue...';
                 try {
                     await apiFetch(`/job/${currentJobId}/transcribe-now`, { method: 'POST' });
-                    UI.tnp.hint.textContent = 'Hardware acceleration engaged. First to finish wins.';
                 } catch (e) {
                     UI.tnp.status.textContent = 'Fast-track failed: ' + e.message;
                 }
