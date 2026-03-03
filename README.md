@@ -80,35 +80,30 @@ sequenceDiagram
     participant LLM as LLM Auditor
 
     UI->>API: POST /api/start-call-audit
-    API-->>UI: Returns job_id with status URL
+    API-->>UI: job_id + metadata
     
-    Note over API,EXT: Asynchronous Transcription Race starts
-    
-    par Thread A: HF Space (Free Tier)
+    par Parallel Execution ⚡
+        Note over API,HF: Thread A: HF Space (Free Tier)
         API->>HF: Stream audio file
-        HF->>HF: Run faster-whisper + pyannote
-        HF-->>API: Transcript + acoustic_profile
-    and Thread B: API Fallback Chain
-        API->>EXT: Attempt ElevenLabs Scribe
-        alt ElevenLabs Success
-            EXT-->>API: Transcript received
-        else ElevenLabs Failed
-            API->>EXT: Attempt Deepgram Nova-2
-            alt Deepgram Success
-                EXT-->>API: Transcript received
-            else Deepgram Failed
-                API->>EXT: Attempt Groq (Last Fallback)
-                EXT-->>API: Transcript received
-            end
-        end
+        HF->>HF: faster-whisper + pyannote diarization
+        HF-->>API: ✓ Transcript + acoustic_profile
+    and
+        Note over API,EXT: Thread B: API Fallback Waterfall
+        API->>EXT: 1️⃣ Try ElevenLabs Scribe
+        EXT-->>API: ✗ Failed or Timeout
+        API->>EXT: 2️⃣ Try Deepgram Nova-2
+        EXT-->>API: ✗ Failed or Timeout
+        API->>EXT: 3️⃣ Try Groq (Last Resort)
+        EXT-->>API: ✓ Transcript received
     end
     
-    Note over API: Winner determined, loser thread cancelled
+    Note over API: 🏁 FIRST SUCCESS WINS — Loser thread cancelled
     
-    API->>LLM: Process transcript with acoustic context
+    API->>LLM: Process winner's transcript + acoustic context
     LLM-->>API: Audit matrix (JSON)
     
-    Note over API: Job status marked DONE
+    UI->>API: Poll /api/job/job_id/status
+    API-->>UI: ✓ DONE + full audit results
 ```
 ---
 
