@@ -6,7 +6,7 @@ import time
 import threading
 import concurrent.futures
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 from dotenv import load_dotenv
 from datetime import datetime
@@ -1114,9 +1114,19 @@ def process_call():
 @app.route('/api/start-call-audit', methods=['POST'])
 def start_call_audit():
     """
-    Starts an async transcription + audit job.
-    Returns immediately with {job_id, fallbacks_available}.
-    Client polls /api/job/<id>/status to track progress.
+    Starts a transcription + audit job and streams SSE progress events back
+    over a single long-lived HTTP connection (text/event-stream).
+
+    This avoids cross-instance in-memory state loss on Vercel — the same
+    function invocation that spawned the background threads is also the one
+    delivering progress and the final result, staying alive for up to 290 s
+    (inside the 300 s maxDuration limit).
+
+    Event shapes:
+      { type: 'job_started', job_id, fallbacks_available, hf_active }
+      { type: 'status',      status, api_chain_started }
+      { type: 'done',        result_type, transcription, audit, ... }
+      { type: 'error',       error }
     """
     try:
         if 'audio' not in request.files:
@@ -1137,13 +1147,78 @@ def start_call_audit():
             return jsonify({'error': f'File exceeds 50 MB ({file_size/1e6:.1f} MB).'}), 413
 
         print(f"[start-call-audit] {filename} ({file_size/1e6:.2f} MB)")
-        job = _start_job(filepath)
+        job      = _start_job(filepath)
+        job_id   = job['job_id']
+        fallbacks = _get_fallbacks_available()
+        hf_active = bool(HF_SPACE_URL and GRADIO_CLIENT_AVAILABLE)
 
-        return jsonify({
-            'job_id':              job['job_id'],
-            'fallbacks_available': _get_fallbacks_available(),
-            'hf_active':          bool(HF_SPACE_URL and GRADIO_CLIENT_AVAILABLE),
-        })
+        def _sse(payload: dict) -> str:
+            return f"data: {json.dumps(payload)}\n\n"
+
+        def _event_stream():
+            import time
+            # Announce job — client stores job_id and may show "Transcribe Now"
+            yield _sse({
+                'type':               'job_started',
+                'job_id':             job_id,
+                'fallbacks_available': fallbacks,
+                'hf_active':          hf_active,
+            })
+
+            # Stay alive until done, error, or 290 s deadline
+            deadline = time.time() + 290
+            while time.time() < deadline:
+                time.sleep(2)
+                j = _jobs.get(job_id)
+                if not j:
+                    yield _sse({'type': 'error', 'error': 'Job expired or not found.'})
+                    return
+
+                st = j.get('status')
+                if st == 'done':
+                    audit_copy  = copy.deepcopy(j['audit'] or {})
+                    audit_meta  = audit_copy.pop('_audit_metadata', {})
+                    _attemp_sum = audit_meta.get('attempted_summary')
+                    payload = {
+                        'type':                   'done',
+                        'result_type':            'call',
+                        'success':                True,
+                        'transcription':          j['transcript'],
+                        'audit':                  audit_copy,
+                        'acoustic_profile':       j['acoustic_profile'],
+                        'timestamp':              datetime.utcnow().isoformat() + 'Z',
+                        'source':                 j['source'],
+                        'audit_scored_by':        audit_meta.get('model_label') or None,
+                        'audit_tier':             audit_meta.get('tier') or None,
+                        'transcription_provider': j.get('transcription_provider') or j.get('source') or None,
+                    }
+                    if _attemp_sum:
+                        payload['audit_attempted_summary'] = _attemp_sum
+                    yield _sse(payload)
+                    return
+
+                elif st == 'error':
+                    yield _sse({'type': 'error', 'error': j.get('error') or 'Transcription failed.'})
+                    return
+
+                else:
+                    yield _sse({
+                        'type':               'status',
+                        'status':             st,
+                        'api_chain_started':  j.get('api_chain_started', False),
+                    })
+
+            yield _sse({'type': 'error', 'error': 'Processing timed out after 290 s.'})
+
+        return Response(
+            stream_with_context(_event_stream()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control':    'no-cache',
+                'X-Accel-Buffering': 'no',
+                'Connection':       'keep-alive',
+            }
+        )
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1198,6 +1273,22 @@ def transcribe_now(job_id):
     job['status'] = 'api_transcribing'
     providers     = _get_fallbacks_available()
     return jsonify({'triggered': True, 'providers': providers})
+
+
+@app.route('/api/admin/clear-cache', methods=['POST'])
+def admin_clear_cache():
+    """
+    Test/admin utility: clears the in-process audit result cache (_AUDIT_CACHE).
+    Only callable from localhost to prevent abuse on production.
+    Returns the number of entries evicted.
+    """
+    remote = request.remote_addr or ''
+    if remote not in ('127.0.0.1', '::1', 'localhost'):
+        return jsonify({'error': 'Forbidden — localhost only'}), 403
+    evicted = len(_AUDIT_CACHE)
+    _AUDIT_CACHE.clear()
+    print(f'[admin] Audit cache cleared — {evicted} entries evicted.')
+    return jsonify({'cleared': True, 'evicted': evicted})
 
 
 @app.route('/api/health')

@@ -3,17 +3,20 @@
 =============================================================================
   Qualora — EXHAUSTIVE FALLBACK TEST SUITE
   Tests every provider, every fallback, every endpoint — live against server
+  Uses real conversation samples from datasets/human_chat.txt.
+  Clears the server-side audit cache before each endpoint section so every
+  test exercises the full LLM pipeline rather than a cached shortcut.
 =============================================================================
 Run with:  .\\venv\\Scripts\\python.exe test_exhaustive.py
 Server must be running on localhost:5000.
 =============================================================================
 """
-import os, sys, io, struct, time, json, wave, traceback
+import os, sys, io, re, struct, time, json, wave, traceback
 import requests
 from dotenv import load_dotenv
 from pathlib import Path
 
-load_dotenv(Path(__file__).parent / '.env')
+load_dotenv(Path(__file__).parent / '.env', override=True)
 
 BASE   = 'http://localhost:5000/api'
 GROQ_KEY      = os.getenv('GROQ_API_KEY', '')
@@ -53,35 +56,142 @@ def skip(name, reason):
     print(f'  {SKIP}  [SKIP]  {name}: {reason}')
     results.append({'name': name, 'passed': True, 'skip': True})
 
+# ── Dataset loader ────────────────────────────────────────────────────────────
+_FALLBACK_TRANSCRIPT = (
+    "Agent: Thank you for calling customer support. How can I help you today?\n"
+    "Customer: Hi, I placed an order three weeks ago and it hasn't arrived yet. "
+    "I'm really frustrated.\n"
+    "Agent: I completely understand your frustration and sincerely apologize. "
+    "Let me pull up your order details right away.\n"
+    "Customer: Yes please. This is unacceptable. I need this urgently.\n"
+    "Agent: I've located your order. It shows a delay at the warehouse. I am "
+    "escalating this to our priority fulfilment team. You'll receive an update "
+    "within 24 hours and I'm applying a 15% discount for your trouble.\n"
+    "Customer: Okay, thank you. I appreciate that."
+)
+
+def _load_dataset_samples(max_samples: int = 20) -> list:
+    """
+    Parse datasets/human_chat.txt into Agent/Customer conversation strings.
+    Conversations are split at greeting boundaries (Human 1: Hi / Hello).
+    Human 1 → Agent, Human 2 → Customer.
+    Falls back to a single hardcoded sample if the file is missing.
+    """
+    dataset_path = Path(__file__).parent / 'datasets' / 'human_chat.txt'
+    if not dataset_path.exists():
+        print(f'  {WARN}  datasets/human_chat.txt not found — using fallback transcript.')
+        return [_FALLBACK_TRANSCRIPT]
+
+    raw_lines = dataset_path.read_text(encoding='utf-8').splitlines()
+    _GREET = re.compile(r'^Human 1:\s*Hi[!.]?\s*$', re.IGNORECASE)
+
+    blocks, current = [], []
+    for line in raw_lines:
+        if _GREET.match(line.strip()) and current:
+            if len(current) >= 4:
+                blocks.append(current)
+            current = [line]
+        elif line.strip():
+            current.append(line)
+    if current and len(current) >= 4:
+        blocks.append(current)
+
+    samples = []
+    for block in blocks[:max_samples]:
+        turns = []
+        for line in block:
+            if line.startswith('Human 1:'):
+                turns.append('Agent:' + line[8:])
+            elif line.startswith('Human 2:'):
+                turns.append('Customer:' + line[8:])
+        if len(turns) >= 4:
+            samples.append('\n'.join(turns))
+
+    if not samples:
+        return [_FALLBACK_TRANSCRIPT]
+    print(f'  {INFO}  Loaded {len(samples)} conversation samples from datasets/human_chat.txt')
+    return samples
+
+DATASET_SAMPLES = _load_dataset_samples()
+
+def dataset_sample(index: int) -> str:
+    """Return sample at index, cycling if index exceeds available samples."""
+    return DATASET_SAMPLES[index % len(DATASET_SAMPLES)]
+
+# ── Cache control ─────────────────────────────────────────────────────────────
+def clear_server_cache(label: str = ''):
+    """
+    POST /api/admin/clear-cache — evicts all entries from the server's
+    _AUDIT_CACHE so the next test hits the full LLM pipeline fresh.
+    """
+    try:
+        r = requests.post(f'{BASE}/admin/clear-cache', timeout=4)
+        evicted = r.json().get('evicted', '?')
+        tag = f' [{label}]' if label else ''
+        print(f'  {INFO}{tag} Server audit cache cleared ({evicted} entries evicted).')
+    except Exception as e:
+        print(f'  {WARN}  clear_server_cache failed: {e}')
+
 # ── Minimal WAV generator ─────────────────────────────────────────────────────
 def make_wav(seconds=2, hz=440, sample_rate=16000) -> bytes:
-    """Generates a pure tone WAV in memory (no files needed)."""
+    """Generates a pure-tone WAV in memory (no disk files needed)."""
     import math
     n_samples = sample_rate * seconds
     buf = io.BytesIO()
     with wave.open(buf, 'w') as wf:
         wf.setnchannels(1)
-        wf.setsampwidth(2)  # 16-bit
+        wf.setsampwidth(2)   # 16-bit
         wf.setframerate(sample_rate)
         for i in range(n_samples):
             val = int(32767 * math.sin(2 * math.pi * hz * i / sample_rate))
             wf.writeframes(struct.pack('<h', val))
     return buf.getvalue()
 
-SAMPLE_WAV = make_wav(seconds=3)  # 3s pure tone — enough for Whisper to process
+SAMPLE_WAV = make_wav(seconds=3)   # 3 s pure tone — enough for Whisper to process
 
-SAMPLE_TRANSCRIPT = (
-    "Agent: Thank you for calling customer support. How can I help you today?\n"
-    "Customer: Hi, I placed an order three weeks ago and it hasn't arrived yet. "
-    "I'm really frustrated.\n"
-    "Agent: I completely understand your frustration and sincerely apologize for "
-    "this inconvenience. Let me pull up your order details right away.\n"
-    "Customer: Yes please. This is unacceptable. I need this urgently.\n"
-    "Agent: I've located your order. It shows a delay at the warehouse. I am "
-    "escalating this to our priority fulfillment team. You'll receive an update "
-    "within 24 hours and I'm applying a 15% discount for your trouble.\n"
-    "Customer: Okay, thank you. I appreciate that."
-)
+# ── SSE consumer ──────────────────────────────────────────────────────────────
+def consume_sse(files_dict: dict, timeout: int = 200) -> dict:
+    """
+    POST to /api/start-call-audit with SSE streaming response.
+    Returns the 'done' event payload, or raises on error/timeout.
+    Prints intermediate status events for visibility.
+    """
+    start = time.time()
+    with requests.post(
+        f'{BASE}/start-call-audit',
+        files=files_dict,
+        stream=True,
+        timeout=timeout,
+    ) as resp:
+        if not resp.ok:
+            raise RuntimeError(f'HTTP {resp.status_code}: {resp.text[:200]}')
+
+        buf = ''
+        for raw in resp.iter_content(chunk_size=None, decode_unicode=False):
+            buf += raw.decode('utf-8', errors='replace')
+            while '\n\n' in buf:
+                frame, buf = buf.split('\n\n', 1)
+                for line in frame.splitlines():
+                    if not line.startswith('data: '):
+                        continue
+                    try:
+                        evt = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    t = evt.get('type', '')
+                    if t == 'job_started':
+                        print(f'         SSE job_started  job={evt.get("job_id","")[:8]}  '
+                              f'hf_active={evt.get("hf_active")}  '
+                              f'fallbacks={evt.get("fallbacks_available")}')
+                    elif t == 'status':
+                        elapsed = time.time() - start
+                        print(f'         SSE status [{elapsed:5.1f}s]  {evt.get("status")}  '
+                              f'api_chain_started={evt.get("api_chain_started")}')
+                    elif t == 'done':
+                        return evt
+                    elif t == 'error':
+                        raise RuntimeError(evt.get('error', 'Unknown SSE error'))
+    raise RuntimeError('SSE stream closed without a done event')
 
 # ═════════════════════════════════════════════════════════════════════════════
 section('1. SERVER HEALTH & CONNECTIVITY')
@@ -111,11 +221,13 @@ except Exception as e:
 # ═════════════════════════════════════════════════════════════════════════════
 section('2. TEXT AUDIT — /api/process-chat')
 # ═════════════════════════════════════════════════════════════════════════════
+clear_server_cache('section 2')
+_S2 = dataset_sample(0)   # first conversation sample
 
 # 2a. Normal request
 try:
     r = requests.post(f'{BASE}/process-chat',
-        json={'text': SAMPLE_TRANSCRIPT}, timeout=35)
+        json={'text': _S2}, timeout=35)
     d = r.json()
     ok = d.get('success') and d.get('audit')
     check('Text audit returns success', ok, f'status={r.status_code} scored_by={d.get("audit_scored_by","?")}')
@@ -140,7 +252,21 @@ try:
 except Exception as e:
     check('Text audit returns success', False, traceback.format_exc())
 
-# 2b. Edge cases
+# 2b. Additional dataset samples — rotate through next two samples
+for _idx, _label in [(1, 'dataset sample #2'), (2, 'dataset sample #3')]:
+    clear_server_cache(f'section 2b sample {_idx}')
+    _sx = dataset_sample(_idx)
+    try:
+        r = requests.post(f'{BASE}/process-chat', json={'text': _sx}, timeout=35)
+        d = r.json()
+        ok = d.get('success') and d.get('audit')
+        check(f'Text audit success — {_label}', ok,
+              f'status={r.status_code} f1={d.get("audit",{}).get("agent_f1_score","?")} '
+              f'scored_by={d.get("audit_scored_by","?")}')
+    except Exception as e:
+        check(f'Text audit success — {_label}', False, str(e)[:120])
+
+# 2c. Edge cases
 try:
     r = requests.post(f'{BASE}/process-chat', json={'text': ''}, timeout=5)
     check('Empty text → 400', r.status_code == 400)
@@ -154,19 +280,31 @@ try:
 except Exception as e:
     check('Malformed JSON → 400', False, str(e))
 
-# 2c. Caching — same request must return same result
+# 2d. Cache round-trip — same input twice should return identical F1 (cache hit),
+#     then clear cache and resubmit to confirm the pipeline runs fresh.
+clear_server_cache('section 2d cache-check prime')
+_S2d = dataset_sample(3)
 try:
-    r1 = requests.post(f'{BASE}/process-chat', json={'text': SAMPLE_TRANSCRIPT}, timeout=35)
-    r2 = requests.post(f'{BASE}/process-chat', json={'text': SAMPLE_TRANSCRIPT}, timeout=35)
+    r1 = requests.post(f'{BASE}/process-chat', json={'text': _S2d}, timeout=35)
+    r2 = requests.post(f'{BASE}/process-chat', json={'text': _S2d}, timeout=35)   # hits cache
     d1, d2 = r1.json(), r2.json()
     if d1.get('success') and d2.get('success'):
         f1_match = d1['audit']['agent_f1_score'] == d2['audit']['agent_f1_score']
-        check('Cache: identical inputs give identical F1', f1_match,
+        check('Cache: identical inputs give identical F1 (cache hit)', f1_match,
               f'f1_1={d1["audit"]["agent_f1_score"]}  f1_2={d2["audit"]["agent_f1_score"]}')
     else:
-        check('Cache: identical inputs give identical F1', False, 'One or both requests failed')
+        check('Cache: identical inputs give identical F1 (cache hit)', False, 'One or both requests failed')
 except Exception as e:
-    check('Cache: identical inputs give identical F1', False, str(e))
+    check('Cache: identical inputs give identical F1 (cache hit)', False, str(e))
+
+clear_server_cache('section 2d post-clear')
+try:
+    r3 = requests.post(f'{BASE}/process-chat', json={'text': _S2d}, timeout=35)
+    d3 = r3.json()
+    check('Post-clear re-audit succeeds (fresh LLM call)', d3.get('success') and d3.get('audit'),
+          f'scored_by={d3.get("audit_scored_by","?")}')
+except Exception as e:
+    check('Post-clear re-audit succeeds (fresh LLM call)', False, str(e))
 
 # ═════════════════════════════════════════════════════════════════════════════
 section('3. GROQ AUDIT MODEL CASCADE — Direct API Tests')
@@ -360,96 +498,134 @@ else:
 # ═════════════════════════════════════════════════════════════════════════════
 section('8. API CHAIN via /api/process-call (sync, audio)')
 # ═════════════════════════════════════════════════════════════════════════════
+clear_server_cache('section 8')
 try:
     files = {'audio': ('test_call.wav', io.BytesIO(SAMPLE_WAV), 'audio/wav')}
     r = requests.post(f'{BASE}/process-call?fast_track=true', files=files, timeout=45)
     d = r.json()
     ok = d.get('success') and d.get('audit')
     check('API chain /process-call (fast_track=true)', ok,
-          f'status={r.status_code} source={d.get("source_node","?")} '
+          f'status={r.status_code} source={d.get("source","?")} '
           f'scored_by={d.get("audit_scored_by","?")}' if r.status_code==200 else d.get('error',''))
     if ok:
         check('Transcription field present', bool(d.get('transcription')),
               f'len={len(d.get("transcription",""))}')
         check('Audit present in call response', isinstance(d.get('audit'), dict))
+        check('transcription_provider field present', bool(d.get('transcription_provider')),
+              f'provider={d.get("transcription_provider","?")}')
 except Exception as e:
     check('API chain /process-call (fast_track=true)', False, str(e)[:120])
 
 # ═════════════════════════════════════════════════════════════════════════════
-section('9. ASYNC JOB SYSTEM — /api/start-call-audit + polling')
+section('9. ASYNC JOB SYSTEM — /api/start-call-audit (SSE streaming)')
 # ═════════════════════════════════════════════════════════════════════════════
+# /start-call-audit now returns text/event-stream (SSE) — a single long-lived
+# connection that emits: job_started → status... → done/error.
+# consume_sse() reads the stream and returns the 'done' payload.
+clear_server_cache('section 9')
 try:
     files = {'audio': ('async_test.wav', io.BytesIO(SAMPLE_WAV), 'audio/wav')}
-    r = requests.post(f'{BASE}/start-call-audit', files=files, timeout=15)
-    d = r.json()
-    job_id = d.get('job_id')
-    check('start-call-audit returns job_id', bool(job_id),
-          f'job_id={job_id}  fallbacks_available={d.get("fallbacks_available")}')
-    check('fallbacks_available is list',
-          isinstance(d.get('fallbacks_available'), list),
-          f'fallbacks={d.get("fallbacks_available")}')
-    check('hf_active field present', 'hf_active' in d,
-          f'hf_active={d.get("hf_active")}')
+    print(f'       Consuming SSE stream from /start-call-audit (up to 200s)...')
+    final = consume_sse(files, timeout=200)
 
-    if job_id:
-        # Poll for up to 120 seconds
-        print(f'       Polling job {job_id[:8]}... (up to 120s)')
-        poll_start = time.time()
-        final_status = None
-        for attempt in range(60):  # 60 × 2s = 120s max
-            time.sleep(2)
-            pr = requests.get(f'{BASE}/job/{job_id}/status', timeout=5)
-            pd = pr.json()
-            status = pd.get('status', 'unknown')
-            elapsed = time.time() - poll_start
-            print(f'       [{elapsed:5.1f}s] status={status} source={pd.get("source","?")}')
-            if status == 'done':
-                final_status = pd
-                break
-            elif status == 'error':
-                raise RuntimeError(f'Job failed: {pd.get("error")}')
-        
-        if final_status:
-            check('Job completes with status=done', True,
-                  f'elapsed={time.time()-poll_start:.1f}s source={final_status.get("source","?")}')
-            check('Job transcription field', bool(final_status.get('transcription')),
-                  f'len={len(final_status.get("transcription",""))}')
-            check('Job audit field', isinstance(final_status.get('audit'), dict))
-            check('Job audit_scored_by field', bool(final_status.get('audit_scored_by')),
-                  f'scored_by={final_status.get("audit_scored_by")} tier={final_status.get("audit_tier")}')
-            check('Job timestamp field', bool(final_status.get('timestamp')))
-        else:
-            check('Job completes with status=done', False, f'Timed out after 120s')
-
-        # Test transcribe-now trigger
-        files2 = {'audio': ('tnow_test.wav', io.BytesIO(SAMPLE_WAV), 'audio/wav')}
-        r2 = requests.post(f'{BASE}/start-call-audit', files=files2, timeout=15)
-        d2 = r2.json()
-        job2 = d2.get('job_id')
-        if job2:
-            time.sleep(1)  # Let HF thread start
-            tr = requests.post(f'{BASE}/job/{job2}/transcribe-now', timeout=5)
-            td = tr.json()
-            check('transcribe-now triggers API chain', tr.status_code == 200,
-                  f'response={td}')
+    check('SSE stream delivers done event', bool(final), f'type={final.get("type")}')
+    check('Job transcription field', bool(final.get('transcription')),
+          f'len={len(final.get("transcription",""))}')
+    check('Job audit field', isinstance(final.get('audit'), dict))
+    check('Job audit_scored_by field', bool(final.get('audit_scored_by')),
+          f'scored_by={final.get("audit_scored_by")} tier={final.get("audit_tier")}')
+    check('Job transcription_provider field', bool(final.get('transcription_provider')),
+          f'provider={final.get("transcription_provider","?")}')
+    check('Job source field', bool(final.get('source')),
+          f'source={final.get("source","?")}')
+    check('Job timestamp field', bool(final.get('timestamp')))
 
 except Exception as e:
-    check('Async job system', False, traceback.format_exc())
+    check('SSE stream delivers done event', False, traceback.format_exc())
+
+# 9b. No-audio guard (start-call-audit must reject without streaming)
+try:
+    r = requests.post(f'{BASE}/start-call-audit', timeout=5)
+    check('/start-call-audit with no audio → 400', r.status_code == 400)
+except Exception as e:
+    check('/start-call-audit with no audio → 400', False, str(e))
+
+# 9c. transcribe-now fires while a fresh SSE job is still open (separate job)
+clear_server_cache('section 9c transcribe-now')
+try:
+    # We need a job_id without consuming the full stream — start a job via a
+    # short timeout to read just the first job_started event, grab the id, then
+    # fire transcribe-now.  Use a Thread to run the SSE consumer concurrently.
+    import threading as _threading
+    _job_id_box = [None]
+    _sse_done   = _threading.Event()
+
+    def _sse_reader():
+        try:
+            files2 = {'audio': ('tnow_test.wav', io.BytesIO(SAMPLE_WAV), 'audio/wav')}
+            with requests.post(f'{BASE}/start-call-audit', files=files2,
+                               stream=True, timeout=200) as _r:
+                _buf = ''
+                for _raw in _r.iter_content(chunk_size=None, decode_unicode=False):
+                    _buf += _raw.decode('utf-8', errors='replace')
+                    while '\n\n' in _buf:
+                        _frame, _buf = _buf.split('\n\n', 1)
+                        for _line in _frame.splitlines():
+                            if not _line.startswith('data: '):
+                                continue
+                            _evt = json.loads(_line[6:])
+                            if _evt.get('type') == 'job_started':
+                                _job_id_box[0] = _evt.get('job_id')
+                            if _evt.get('type') in ('done', 'error'):
+                                _sse_done.set()
+                                return
+        except Exception:
+            _sse_done.set()
+
+    _t = _threading.Thread(target=_sse_reader, daemon=True)
+    _t.start()
+
+    # Wait up to 8 s for job_started event
+    for _ in range(40):
+        if _job_id_box[0]:
+            break
+        time.sleep(0.2)
+
+    _jid = _job_id_box[0]
+    if _jid:
+        time.sleep(1)   # Let HF thread start
+        tr = requests.post(f'{BASE}/job/{_jid}/transcribe-now', timeout=6)
+        td = tr.json()
+        check('transcribe-now triggers API chain', tr.status_code == 200,
+              f'response={td}')
+    else:
+        skip('transcribe-now triggers API chain', 'job_id not received in time')
+
+    _sse_done.wait(timeout=220)   # Let background SSE thread finish cleanly
+except Exception as e:
+    check('transcribe-now triggers API chain', False, traceback.format_exc())
 
 # ═════════════════════════════════════════════════════════════════════════════
 section('10. FILE UPLOAD — /api/process-file')
 # ═════════════════════════════════════════════════════════════════════════════
-# 10a. TXT upload
-try:
-    files = {'file': ('transcript.txt', io.BytesIO(SAMPLE_TRANSCRIPT.encode()), 'text/plain')}
-    r = requests.post(f'{BASE}/process-file', files=files, timeout=35)
-    d = r.json()
-    check('TXT file upload audit', d.get('success') and d.get('audit'),
-          f'status={r.status_code} scored_by={d.get("audit_scored_by","?")}')
-except Exception as e:
-    check('TXT file upload audit', False, str(e)[:120])
+
+# 10a. TXT uploads — three different dataset samples, cache cleared each time
+for _fi, _ds_idx in [(0, 4), (1, 5), (2, 6)]:
+    clear_server_cache(f'section 10a file-{_fi}')
+    _txt = dataset_sample(_ds_idx).encode()
+    try:
+        files = {'file': (f'transcript_{_fi}.txt', io.BytesIO(_txt), 'text/plain')}
+        r = requests.post(f'{BASE}/process-file', files=files, timeout=35)
+        d = r.json()
+        check(f'TXT file upload audit — dataset sample #{_ds_idx}',
+              d.get('success') and d.get('audit'),
+              f'status={r.status_code} scored_by={d.get("audit_scored_by","?")} '
+              f'f1={d.get("audit",{}).get("agent_f1_score","?")}')
+    except Exception as e:
+        check(f'TXT file upload audit — dataset sample #{_ds_idx}', False, str(e)[:120])
 
 # 10b. PDF upload (minimal valid PDF)
+clear_server_cache('section 10b pdf')
 try:
     MINIMAL_PDF = b"""%PDF-1.4
 1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
@@ -474,7 +650,7 @@ startxref
     files = {'file': ('test.pdf', io.BytesIO(MINIMAL_PDF), 'application/pdf')}
     r = requests.post(f'{BASE}/process-file', files=files, timeout=35)
     d = r.json()
-    # PDF may fail to extract text (minimal PDF, no real text layer) — that's acceptable
+    # Minimal PDF may fail text extraction — that's acceptable (warn, not fail)
     check('PDF file upload handled', r.status_code in (200, 400),
           f'status={r.status_code} success={d.get("success")} error={d.get("error","")[:80]}',
           warn=not d.get('success'))

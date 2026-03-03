@@ -1,5 +1,5 @@
 /* ========================================================================
-   BRIEFLY QA — CORE LOGIC V4.2
+   BRIEFLY QA — CORE LOGIC V4.3
    Architecture: Audit-First, Chart-Driven, HITL-Ready
    ======================================================================== */
 
@@ -302,31 +302,20 @@ async function processVoiceSignal() {
         const formData = new FormData();
         formData.append('audio', AppState.currentAudio);
 
-        // Always use async job polling — works identically on local and Vercel.
-        // HF Space fires immediately in a background thread; API chain fires
-        // concurrently when the user clicks "Transcribe Now" or after 90s timeout.
-        const res = await apiFetch('/start-call-audit', { method: 'POST', body: formData });
-        currentJobId = res.job_id;
-
-        let isFastTracked = false;
-        if (res.fallbacks_available?.length) {
-            UI.tnp.panel.hidden = false;
-            UI.tnp.btn.disabled = false;
-
-            UI.tnp.btn.onclick = async () => {
-                if (!currentJobId || isFastTracked) return;
-                isFastTracked = true;
-                UI.tnp.btn.disabled = true;
-                activateFastTrackVisual();
-                try {
-                    await apiFetch(`/job/${currentJobId}/transcribe-now`, { method: 'POST' });
-                } catch (e) {
-                    UI.loaderText.textContent = '⚠️ Fast-track failed: ' + e.message;
-                }
-            };
+        // Single streaming connection — server sends SSE events over one long-lived
+        // request instead of client polling multiple short requests. This prevents
+        // Vercel cross-instance in-memory state loss (job dict visible only to the
+        // instance that spawned it) and works identically on local and Vercel.
+        const response = await fetch(`${API_BASE_URL}/start-call-audit`, {
+            method: 'POST',
+            body:   formData,
+        });
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData.error || `HTTP ${response.status}`);
         }
 
-        await pollJobStatus(currentJobId);
+        await _readJobStream(response);
 
     } catch (err) {
         notify(err.message, 'error');
@@ -336,54 +325,89 @@ async function processVoiceSignal() {
     }
 }
 
-async function pollJobStatus(jobId) {
-    while (true) {
-        await new Promise(r => setTimeout(r, 2000));
-        if (jobId !== currentJobId) return; // User cancelled or left
+/**
+ * Reads the SSE text/event-stream from /start-call-audit.
+ * Events:  job_started | status | done | error
+ */
+async function _readJobStream(response) {
+    const reader  = response.body.getReader();
+    const decoder = new TextDecoder();
+    let   buffer  = '';
+    let   isFastTracked = false;
 
-        try {
-            const res = await apiFetch(`/job/${jobId}/status`);
-            if (res.status === 'done') {
-                // Ensure transcription field exists (backward compatibility for both field names)
-                if (!res.transcription && res.transcript) {
-                    res.transcription = res.transcript;
-                }
-                if (AppState.currentAudio) {
-                    res.localAudioUrl = URL.createObjectURL(AppState.currentAudio);
-                    res.audioName = AppState.currentAudio.name;
-                }
-                // Ensure the response is properly passed as the entire object
-                renderAuditDashboard(res);
-                archiveAudit(res);
-                resetAudioInput();
-                toggleLoader(false);
-                setGlobalLock(false);
-                UI.tnp.panel.hidden = true;
-                currentJobId = null;
-                if (UI.statusText) UI.statusText.textContent = 'System Ready';
-                return;
-            } else if (res.status === 'error') {
-                throw new Error(res.error || 'Unknown job failure');
-            } else {
-                const statusMap = {
-                    'hf_transcribing': 'HF Space transcribing...',
-                    'api_transcribing': 'API chain transcribing...',
-                    'auditing': 'AI auditing interaction...',
-                };
-                UI.loaderText.textContent = statusMap[res.status] || 'Processing...';
-                if (UI.statusText) {
-                    UI.statusText.textContent = `[Job ${jobId.substring(0, 6)}] ${res.status.replace(/_/g, ' ')}`;
+    const STATUS_MAP = {
+        'hf_transcribing': 'HF Space transcribing...',
+        'api_transcribing': 'API chain transcribing...',
+        'auditing':         'AI auditing interaction...',
+    };
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            // SSE frames are separated by double newlines
+            const frames = buffer.split('\n\n');
+            buffer = frames.pop(); // keep any incomplete trailing frame
+
+            for (const frame of frames) {
+                if (!frame.startsWith('data: ')) continue;
+                let event;
+                try { event = JSON.parse(frame.slice(6)); }
+                catch { continue; }
+
+                if (event.type === 'job_started') {
+                    currentJobId = event.job_id;
+                    if (event.fallbacks_available?.length) {
+                        UI.tnp.panel.hidden = false;
+                        UI.tnp.btn.disabled = false;
+                        UI.tnp.btn.onclick = async () => {
+                            if (!currentJobId || isFastTracked) return;
+                            isFastTracked = true;
+                            UI.tnp.btn.disabled = true;
+                            activateFastTrackVisual();
+                            try {
+                                await apiFetch(`/job/${currentJobId}/transcribe-now`, { method: 'POST' });
+                            } catch (e) {
+                                UI.loaderText.textContent = '⚠️ Fast-track failed: ' + e.message;
+                            }
+                        };
+                    }
+
+                } else if (event.type === 'status') {
+                    UI.loaderText.textContent = STATUS_MAP[event.status] || 'Processing...';
+                    if (UI.statusText) {
+                        UI.statusText.textContent =
+                            `[Job ${currentJobId?.substring(0, 6)}] ${(event.status || '').replace(/_/g, ' ')}`;
+                    }
+
+                } else if (event.type === 'done') {
+                    const res = event;
+                    res.type = res.result_type || 'call'; // restore audit result type
+                    if (!res.transcription && res.transcript) res.transcription = res.transcript;
+                    if (AppState.currentAudio) {
+                        res.localAudioUrl = URL.createObjectURL(AppState.currentAudio);
+                        res.audioName     = AppState.currentAudio.name;
+                    }
+                    renderAuditDashboard(res);
+                    archiveAudit(res);
+                    resetAudioInput();
+                    toggleLoader(false);
+                    setGlobalLock(false);
+                    UI.tnp.panel.hidden = true;
+                    currentJobId = null;
+                    if (UI.statusText) UI.statusText.textContent = 'System Ready';
+                    return;
+
+                } else if (event.type === 'error') {
+                    throw new Error(event.error || 'Job failed');
                 }
             }
-        } catch (e) {
-            notify(e.message, 'error');
-            toggleLoader(false);
-            setGlobalLock(false);
-            UI.tnp.panel.hidden = true;
-            currentJobId = null;
-            if (UI.statusText) UI.statusText.textContent = 'System Error';
-            return;
         }
+    } finally {
+        reader.releaseLock();
     }
 }
 
