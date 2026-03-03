@@ -73,126 +73,80 @@ The **first thread to successfully return a full transcript wins** and locks the
 
 ```mermaid
 graph TD
-    %% ── ENTRY ─────────────────────────────────────────────────────
-    Start([" 🎙 Audio / Text Ingest"])
-    Start --> Type{Input Type?}
-    %% ── TEXT PATH ─────────────────────────────────────────────────
-    Type -- "Text / File Upload" --> TextPrep["Sanitise + Truncate\n24 000-char limit"]
-    TextPrep --> AuditEntry
-    %% ── VOICE PATH: ENV ROUTER ────────────────────────────────────
-    Type -- "Voice / Call Recording" --> EnvRouter{Deployment\nEnvironment?}
-    %% ── LOCAL: ASYNC JOB SYSTEM ───────────────────────────────────
-    EnvRouter -- "Local / Persistent Server" --> JobStart["POST /start-call-audit\nCreate UUID Job Dict"]
-    JobStart --> JobPoll["Client polls\n/job/:id/status every 2 s"]
-    subgraph AsyncJob ["⚙️  Async Job Engine (Local)"]
-        direction TB
-        HFThread["Thread 1 — HF Space\nWhisperX + pyannote"]
-        APIThread["Thread 2 — API Chain\nlazy, on demand"]
-        WinEvent["threading.Event\n winner.set()"]
-        Timer90["Timeout Watcher\n90 s sentinel thread"]
-        AuditWatcher["Audit Watcher thread\nwaits on winner.set()"]
-        HFThread -- "TX ready" --> WinEvent
-        APIThread -- "TX ready" --> WinEvent
-        Timer90 -- "90 s elapsed\nHF not yet done" --> APIThread
-        WinEvent --> AuditWatcher
-    end
-    JobStart --> AsyncJob
-    FastTrack["🟡 Fast-Track Button\n/job/:id/transcribe-now"] -- "POST → sets api_chain_started" --> APIThread
-    JobPoll -- "status=done" --> AuditEntry
-    %% ── VERCEL: SYNC RACE PATH ────────────────────────────────────
-    EnvRouter -- "Vercel (maxDuration 60 s)" --> VercelSync["POST /process-call\nSync waterfall"]
-    subgraph VercelRace ["⚡  Vercel Sync Race"]
+    Input(["📥  Your Input\nAudio Call  ·  Chat Text  ·  Uploaded File"])
+    Input --> Kind{What kind\nof input?}
+
+    %% ── TEXT FAST PATH ───────────────────────────────────────────
+    Kind -- "💬 Text / File" --> TextReady["Ready to analyse\nimmediately"]
+    TextReady --> Analyse
+
+    %% ── VOICE RACE ───────────────────────────────────────────────
+    Kind -- "🎙 Voice / Audio" --> Race
+
+    subgraph Race ["🏁  Transcription Race  —  first to finish wins"]
         direction LR
-        VPrimary["Attempt 1\nHF Space first"]
-        AbortCtrl["AbortController\nclient-side"]
-        VFast["Attempt 2\n?fast_track=true"]
-        VPrimary -- "504 or Fast-Track click" --> AbortCtrl
-        AbortCtrl -- "abort + new token" --> VFast
+        Best["⭐ Best Quality\nHF Space AI\nFull speaker labels\n+ voice stress reading"]
+        Fast["⚡ Speed Backup\nCloud API Chain\nElevenLabs → Deepgram → Groq"]
+        FTBtn["🟡 Fast-Track Button\nSkip the wait —\ngo straight to backup"]
+
+        Best -- "Wins if fast enough" --> Winner(["🏆 Transcript Ready"])
+        Fast -- "Wins if primary slow" --> Winner
+        FTBtn -- "User clicks" --> Fast
     end
-    VercelSync --> VercelRace
-    VercelRace -- "first valid response" --> AuditEntry
-    %% ── HF SPACE NODE ─────────────────────────────────────────────
-    subgraph HFSpace ["☁️  HF Space Node"]
+
+    Race --> Analyse
+
+    %% ── AI AUDIT ─────────────────────────────────────────────────
+    subgraph Analyse ["🧠  AI Quality Audit  —  automatic model switching"]
         direction TB
-        Whisper["WhisperX ASR\nword timestamps"]
-        Pyannote["pyannote 3.1\nSpeaker Diarization"]
-        Parsel["parselmouth\nPitch + Intensity"]
-        SpeechBrain["SpeechBrain wav2vec2\nAcoustic Emotion"]
-        AcousticProfile["Acoustic Profile\npitch · intensity · emotion · turns"]
-        Whisper --> Pyannote --> Parsel --> SpeechBrain --> AcousticProfile
-    end
-    HFThread --> HFSpace
-    HFSpace -- "transcript + acoustic_profile" --> WinEvent
-    %% ── API FALLBACK CHAIN ────────────────────────────────────────
-    subgraph APIChain ["🔗  API Fallback Chain"]
-        direction LR
-        EL["ElevenLabs Scribe v1\nword-level + speaker_id"]
-        DG["Deepgram Nova-2\nutterances + diarization"]
-        GW["Groq Whisper\nlarge-v3 → v3-turbo"]
-        EL -- "Fail" --> DG -- "Fail" --> GW
-    end
-    APIThread --> APIChain
-    APIChain -- "plain transcript" --> WinEvent
-    %% ── AUDIT ENGINE ──────────────────────────────────────────────
-    AuditEntry(["🧠  generate_quality_audit()"])
-    subgraph AuditEngine ["🔍  Qualora Audit Engine"]
-        direction TB
-        CacheCheck{SHA-256\nCache Hit?}
-        BuildPrompt["Build Prompt\n+ Acoustic Context preamble"]
-        CacheCheck -- "HIT ⚡" --> CacheReturn["deepcopy cached result"]
-        CacheCheck -- "MISS" --> BuildPrompt
-        subgraph ModelCascade ["Model Cascade — first success wins"]
-            direction TB
-            T1["T1 — Llama 3.3 70B\n12K TPM · json_object mode"]
-            T2a["T2 — Llama 3.1 8B Instant\n14.4K RPD · json_object mode"]
-            T2b["T2 — Llama 4 Scout 17B\n30K TPM · text mode"]
-            T2c["T2 — Llama 4 Maverick 17B\n6K TPM · text mode"]
-            T3["T3 — Kimi K2\n10K TPM · text mode"]
-            T4["T4 — OpenRouter Gemini 2.5 Flash\nREST fallback"]
-            SafeJSON["🛡 Safe Fallback JSON\nall zeros · hitl_review=true"]
-            T1 -- "Rate-limit / Error" --> T2a
-            T2a -- "Rate-limit / Error" --> T2b
-            T2b -- "Rate-limit / Error" --> T2c
-            T2c -- "Rate-limit / Error" --> T3
-            T3 -- "Rate-limit / Error" --> T4
-            T4 -- "Timeout / Error\nor key missing" --> SafeJSON
+        Cached{"Seen before?"}
+        Cached -- "Yes ⚡" --> Skip["Return instant\ncached result"]
+        Cached -- "No" --> AI
+
+        subgraph AI ["Tries each AI in order until one succeeds"]
+            direction LR
+            M1["Llama 3.3 70B\nBest accuracy"]
+            M2["Llama 3.1 8B\nor Llama 4 Scout"]
+            M3["Kimi K2"]
+            M4["Gemini 2.5 Flash\nvia OpenRouter"]
+            MF["Safe defaults\nif all fail"]
+            M1 -- busy --> M2 -- busy --> M3 -- busy --> M4 -- busy --> MF
         end
-        BuildPrompt --> ModelCascade
-        JSONRepair["_repair_json()\nstrip fences → brace-extract → fix trailing commas → truncate"]
-        DefMerge["_apply_defensive_merge()\nfill missing keys · infer F1 · infer timeline · default nudges"]
-        ModelCascade -- "raw LLM string" --> JSONRepair --> DefMerge
-        DefMerge --> StoreCache["deepcopy → SHA-256 cache\n+ _audit_metadata tag"]
+
+        AI --> Fix["Validate & fill any\nmissing fields automatically"]
+        Fix --> Save["Save result so\nnext request is instant"]
     end
-    AuditEntry --> CacheCheck
-    StoreCache --> CacheReturn
-    %% ── RESPONSE + DASHBOARD ──────────────────────────────────────
-    CacheReturn --> ResponseShape["API Response\nsuccess · type · timestamp · transcription\naudit dict · scored_by · tier · acoustic_profile"]
-    subgraph Dashboard ["📊  Dashboard Render"]
+
+    Skip --> Report
+    Save --> Report
+
+    %% ── DASHBOARD ─────────────────────────────────────────────────
+    subgraph Report ["📊  Your Results Dashboard"]
         direction LR
-        KPI["KPI Cards\nF1 · Satisfaction · Risk"]
-        Radar["Radar Chart\nQuality Matrix"]
-        Timeline["Emotion Timeline\nECharts"]
-        Flags["Compliance Flags"]
-        Nudges["Behavioral Nudges"]
-        HITL["HITL Review\nApprove · Flag · Reject"]
-        Archive["LocalStorage Archive"]
-        KPI --> Radar --> Timeline --> Flags --> Nudges --> HITL --> Archive
+        R1["📈 Agent Score\n& KPI cards"]
+        R2["🕸 Quality\nRadar Chart"]
+        R3["😤 Emotion\nTimeline"]
+        R4["⚠️ Compliance\nFlags"]
+        R5["💡 Coaching\nNudges"]
+        R6["✅ Human Review\nApprove · Flag"]
+        R1 --> R2 --> R3 --> R4 --> R5 --> R6
     end
-    ResponseShape --> Dashboard
-    classDef tier1  fill:#0d5c3a,stroke:#00c875,color:#fff,font-weight:bold
-    classDef tier2  fill:#1a4a2e,stroke:#00c875,color:#ccc
-    classDef tier3  fill:#3a2e00,stroke:#ffc107,color:#fff
-    classDef safe   fill:#5c1a1a,stroke:#ff4444,color:#fff
-    classDef cache  fill:#2a1a4a,stroke:#9c6fff,color:#fff
-    classDef warn   fill:#4a3000,stroke:#ffc107,color:#fff
-    class T1 tier1
-    class T2a,T2b,T2c tier2
-    class T3,T4 tier3
-    class SafeJSON,CacheReturn safe
-    class StoreCache,CacheCheck cache
-    class FastTrack warn
+
+    classDef green  fill:#0d5c3a,stroke:#00c875,color:#fff,font-weight:bold
+    classDef amber  fill:#4a3000,stroke:#ffc107,color:#fff
+    classDef blue   fill:#0a2a50,stroke:#4a9eff,color:#fff
+    classDef safe   fill:#3a0a0a,stroke:#ff6666,color:#fff
+    classDef dash   fill:#1a1a3a,stroke:#9c6fff,color:#fff
+
+    class Best,M1 green
+    class FTBtn,Fast amber
+    class Analyse,Winner blue
+    class MF safe
+    class R1,R2,R3,R4,R5,R6 dash
 ```
+
 ---
+
 
 ## 🛠️ Technology Stack
 
