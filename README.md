@@ -74,50 +74,87 @@ The **first thread to successfully return a full transcript wins** and locks the
 ```mermaid
 sequenceDiagram
     autonumber
-    participant UI as Browser (UI)
+    participant UI as Browser (Qualora UI)
     participant API as Flask Backend
-    participant HF as HF Space Node
-    participant EXT as External APIs
-    participant LLM as LLM Auditor
+    participant HF as HF Space (WhisperX Node)
+    participant EXT as API Fallback Chain
+    participant LLM as LLM Audit Cascade
 
-    UI->>API: POST /api/start-call-audit (Audio/Text)
-    API-->>UI: Returns job_id + metadata (hf_active, fallbacks)
+    UI->>API: POST /api/start-call-audit
+    API-->>UI: job_id + fallbacks_available
     
-    Note over UI, API: UI begins async status polling / SSE
+    rect rgb(230, 245, 255)
+    Note over API,EXT: [RACE COMMENCED] Free Node vs Premium Latency
+    par Thread A: HF Space (Deep Analysis)
+        API->>HF: Audio Upload
+        HF->>HF: faster-whisper + pyannote 3.1
+        Note right of HF: High Accuracy Diarization<br/>+ Acoustic Stress Profiling
+        HF-->>API: Transcript + Acoustic Signals
+    and Thread B: API Waterfall (High Availability)
+        API->>EXT: T1: ElevenLabs Scribe
+        EXT-->>API: (Timeout/Fail)
+        API->>EXT: T2: Deepgram Nova-2
+        EXT-->>API: (Timeout/Fail)
+        API->>EXT: T3: Groq Whisper-large-v3
+        EXT-->>API: Transcript (Success)
+    end
+    end
+    
+    Note over API: 🏆 WINNER DECLARED<br/>(First valid transcript locks job)
+    
+    UI->>API: [Optional] Fast Track Button
+    API->>EXT: Immediate Priority API Trigger
 
-    rect rgb(240, 248, 255)
-    par Thread A: HF Space (Free Tier)
-        Note over API,HF: Primary Audio Processing
-        API->>HF: Stream audio file
-        HF->>HF: faster-whisper + pyannote + speechbrain
-        HF-->>API: ✓ Transcript + acoustic_profile
-    and Thread B: API Fallback Waterfall
-        Note over API,EXT: Commercial API Fallback Sequence
-        API->>EXT: 1️⃣ Try ElevenLabs Scribe
-        EXT-->>API: ✗ Failed or Timeout
-        API->>EXT: 2️⃣ Try Deepgram Nova-2
-        EXT-->>API: ✗ Failed or Timeout
-        API->>EXT: 3️⃣ Try Groq (Whisper-large-v3)
-        EXT-->>API: ✓ Transcript received
-    end
+    API->>LLM: Enhanced Prompt (Transcript + Biometric Context)
+    
+    rect rgb(255, 250, 240)
+    Note over LLM: [AUDIT CASCADE] Smart Model Switching
+    LLM->>LLM: Try T1: Llama 3.3 70B (JSON Mode)
+    Note right of LLM: If Rate Limited / Failed...
+    LLM->>LLM: Try T2: Llama 3.1 8B / Llama 4 Scout
+    Note right of LLM: If Still Failed...
+    LLM->>LLM: Try T3: OpenRouter Gemini 2.5 Flash
     end
     
-    Note over API: 🏁 FIRST SUCCESS WINS<br/>Loser thread cancelled
+    LLM-->>API: Structured Audit (JSON)
+    API-->>UI: ✓ job_status: 'done' + Audit Dashboard 📊
+```
+
+### Fallback Resilience Flowchart
+
+```mermaid
+graph TD
+    Start([Audio/Text Ingest]) --> Type{Input Type?}
     
-    API->>LLM: Prompt with Transcript + Acoustic Context
-    Note over LLM: LLM Cascade Execution<br/>(T1: Llama 3.3 70B → T4: Gemini)
-    LLM-->>API: Audit matrix (JSON)
+    Type -- Text/File --> Audit[LLM Audit Cascade]
+    Type -- Voice/Call --> Race[[Distributed Hybrid Race]]
     
-    API->>API: Cache results (SHA-256 hash)
-    
-    loop Real-Time Updates
-        UI->>API: GET /api/job/<job_id>/status
-        alt Job Still Processing
-            API-->>UI: ⏳ Status: hf_transcribing / pending
-        else Job Complete
-            API-->>UI: ✓ Status: done + Full Audit Results
-        end
+    subgraph Race [Transcription Race]
+        direction LR
+        HFS[HF Space WhisperX]
+        AB[Fast Track Button]
+        API_C[API Fallback Chain]
+        
+        HFS -- "Winner (Free/Diarized)" --> Audit
+        AB -- "Manual Override" --> API_C
+        API_C -- "Winner (Speed/Reliable)" --> Audit
     end
+    
+    subgraph Audit [Qualora Audit Engine]
+        direction TB
+        L70[Llama 3.3 70B - T1]
+        L8[Llama 3.1 8B - T2]
+        L4[Llama 4 Scout - T3]
+        OR[OpenRouter Gemini - T4]
+        
+        L70 -- Fail --> L8
+        L8 -- Fail --> L4
+        L4 -- Fail --> OR
+        OR -- Fail --> Default([Safe Fallback JSON])
+    end
+    
+    Audit --> Cache[(SHA-256 result cache)]
+    Cache --> UI([Dashboard Render])
 ```
 ---
 
