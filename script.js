@@ -761,8 +761,20 @@ function renderEmotionTopography(timeline) {
 
     _echartsInstance.setOption(option);
 
-    // Respond to container resize (e.g. window resize, panel change)
-    const ro = new ResizeObserver(() => { if (_echartsInstance) _echartsInstance.resize(); });
+    // Respond to window/panel resize — only when container is actually visible
+    const ro = new ResizeObserver(() => {
+        if (!_echartsInstance) return;
+        const { offsetWidth: w, offsetHeight: h } = container;
+        if (w > 0 && h > 0) {
+            _echartsInstance.resize();
+        } else {
+            // Container collapsed to zero (panel hidden) — dispose GL context to
+            // stop WebGL framebuffer errors; next render call will reinitialise.
+            ro.disconnect();
+            _echartsInstance.dispose();
+            _echartsInstance = null;
+        }
+    });
     ro.observe(container);
 }
 
