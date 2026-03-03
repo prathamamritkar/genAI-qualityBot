@@ -4,7 +4,7 @@
    ======================================================================== */
 
 // ── Configuration ─────────────────────────────────────────────────────────
-const API_BASE_URL = window.location.hostname === 'localhost'
+const API_BASE_URL = (window.location.hostname === 'localhost' && window.location.port !== '3000')
     ? 'http://localhost:5000/api'
     : '/api';
 

@@ -286,7 +286,10 @@ def perform_voice_capture_apis(audio_path: str) -> str:
         except Exception as e:
             print(f"⚠️  [Groq] {e}")
 
-    raise RuntimeError("All API-chain transcription providers failed or are unconfigured.")
+    if not (elevenlabs_client or deepgram_client or groq_client):
+        raise RuntimeError("No transcription providers configured. Please add GROQ_API_KEY to your Vercel Environment Variables.")
+        
+    raise RuntimeError("All configured API-chain transcription providers failed to process the audio.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
