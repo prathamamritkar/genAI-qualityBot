@@ -73,62 +73,61 @@ The **first thread to successfully return a full transcript wins** and locks the
 
 ```mermaid
 graph TD
-    Input(["📥  Your Input\nAudio Call  ·  Chat Text  ·  Uploaded File"])
-    Input --> Kind{What kind\nof input?}
+    Input(["Your Input - Audio Call, Chat Text or Uploaded File"])
+    Input --> Kind{What kind of input?}
 
-    %% ── TEXT FAST PATH ───────────────────────────────────────────
-    Kind -- "💬 Text / File" --> TextReady["Ready to analyse\nimmediately"]
+    Kind -- "Text or File" --> TextReady["Ready to analyse immediately"]
     TextReady --> Analyse
 
-    %% ── VOICE RACE ───────────────────────────────────────────────
-    Kind -- "🎙 Voice / Audio" --> Race
+    Kind -- "Voice or Audio" --> Race
 
-    subgraph Race ["🏁  Transcription Race  —  first to finish wins"]
+    subgraph Race [Transcription Race - first to finish wins]
         direction LR
-        Best["⭐ Best Quality\nHF Space AI\nFull speaker labels\n+ voice stress reading"]
-        Fast["⚡ Speed Backup\nCloud API Chain\nElevenLabs → Deepgram → Groq"]
-        FTBtn["🟡 Fast-Track Button\nSkip the wait —\ngo straight to backup"]
+        Best["Best Quality - HF Space AI
+        Full speaker labels + voice stress reading"]
+        Fast["Speed Backup - Cloud API Chain
+        ElevenLabs then Deepgram then Groq"]
+        FTBtn["Fast-Track Button
+        Skip the wait, go straight to backup"]
 
-        Best -- "Wins if fast enough" --> Winner(["🏆 Transcript Ready"])
+        Best -- "Wins if fast enough" --> Winner(["Transcript Ready"])
         Fast -- "Wins if primary slow" --> Winner
         FTBtn -- "User clicks" --> Fast
     end
 
     Race --> Analyse
 
-    %% ── AI AUDIT ─────────────────────────────────────────────────
-    subgraph Analyse ["🧠  AI Quality Audit  —  automatic model switching"]
+    subgraph Analyse [AI Quality Audit - automatic model switching]
         direction TB
-        Cached{"Seen before?"}
-        Cached -- "Yes ⚡" --> Skip["Return instant\ncached result"]
+        Cached{"Seen this before?"}
+        Cached -- "Yes - instant" --> Skip["Return cached result"]
         Cached -- "No" --> AI
 
-        subgraph AI ["Tries each AI in order until one succeeds"]
+        subgraph AI [Tries each AI in order until one succeeds]
             direction LR
-            M1["Llama 3.3 70B\nBest accuracy"]
-            M2["Llama 3.1 8B\nor Llama 4 Scout"]
+            M1["Llama 3.3 70B - Best accuracy"]
+            M2["Llama 3.1 8B or Llama 4 Scout"]
             M3["Kimi K2"]
-            M4["Gemini 2.5 Flash\nvia OpenRouter"]
-            MF["Safe defaults\nif all fail"]
+            M4["Gemini 2.5 Flash via OpenRouter"]
+            MF["Safe defaults if all fail"]
             M1 -- busy --> M2 -- busy --> M3 -- busy --> M4 -- busy --> MF
         end
 
-        AI --> Fix["Validate & fill any\nmissing fields automatically"]
-        Fix --> Save["Save result so\nnext request is instant"]
+        AI --> Fix["Validate and fill any missing fields"]
+        Fix --> Save["Save result so next request is instant"]
     end
 
     Skip --> Report
     Save --> Report
 
-    %% ── DASHBOARD ─────────────────────────────────────────────────
-    subgraph Report ["📊  Your Results Dashboard"]
+    subgraph Report [Your Results Dashboard]
         direction LR
-        R1["📈 Agent Score\n& KPI cards"]
-        R2["🕸 Quality\nRadar Chart"]
-        R3["😤 Emotion\nTimeline"]
-        R4["⚠️ Compliance\nFlags"]
-        R5["💡 Coaching\nNudges"]
-        R6["✅ Human Review\nApprove · Flag"]
+        R1["Agent Score and KPI Cards"]
+        R2["Quality Radar Chart"]
+        R3["Emotion Timeline"]
+        R4["Compliance Flags"]
+        R5["Coaching Nudges"]
+        R6["Human Review - Approve or Flag"]
         R1 --> R2 --> R3 --> R4 --> R5 --> R6
     end
 
@@ -140,10 +139,11 @@ graph TD
 
     class Best,M1 green
     class FTBtn,Fast amber
-    class Analyse,Winner blue
+    class Winner blue
     class MF safe
     class R1,R2,R3,R4,R5,R6 dash
 ```
+
 
 ---
 
