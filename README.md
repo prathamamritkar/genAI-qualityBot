@@ -89,7 +89,6 @@ sequenceDiagram
         HF->>HF: Run faster-whisper + pyannote
         HF-->>API: Transcript + acoustic_profile
     and Thread B: API Fallback Chain
-        rect rgb(240, 240, 240)
         API->>EXT: Attempt ElevenLabs Scribe
         alt ElevenLabs Success
             EXT-->>API: Transcript received
@@ -101,7 +100,6 @@ sequenceDiagram
                 API->>EXT: Attempt Groq (Last Fallback)
                 EXT-->>API: Transcript received
             end
-        end
         end
     end
     
