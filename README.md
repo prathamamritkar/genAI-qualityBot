@@ -1,284 +1,368 @@
-<div align="center">
-  <img src="./favicon.svg" width="120" alt="Qualora Logo" />
+﻿<div align="center">
+  <img src="./favicon.svg" width="100" alt="Qualora Logo" />
   <h1>Qualora</h1>
-  <p><strong>Turn every conversation into intelligence.</strong></p>
-  <p><em>An enterprise-grade, distributed AI platform for customer support auditing, employing a hybrid competitive architecture for voice-to-insights processing.</em></p>
+  <p><strong>Turn every customer conversation into structured intelligence.</strong></p>
+  <p><em>An enterprise-grade AI auditing platform that transcribes, analyses, and scores support interactions — across voice, text, and file — with zero single point of failure.</em></p>
 
   [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](#)
   [![Flask](https://img.shields.io/badge/Backend-Flask-black?logo=flask&logoColor=white)](#)
-  [![HuggingFace](https://img.shields.io/badge/AI_Engine-HuggingFace-yellow?logo=huggingface&logoColor=black)](#)
+  [![HuggingFace](https://img.shields.io/badge/ASR_Node-HuggingFace-yellow?logo=huggingface&logoColor=black)](#)
+  [![Vercel](https://img.shields.io/badge/Deploy-Vercel-black?logo=vercel&logoColor=white)](#)
   [![License](https://img.shields.io/badge/License-MIT-green.svg)](#)
 </div>
 
 ---
 
-## 📋 Table of Contents
+## What Qualora Does
 
-1. [Project Overview](#-project-overview)
-2. [Key Capabilities](#-key-capabilities)
-3. [System Architecture](#-system-architecture)
-4. [Technology Stack](#-technology-stack)
-5. [Getting Started](#-getting-started)
-6. [Hugging Face Space Node Setup](#-hugging-face-space-node-setup)
-7. [API Reference](#-api-reference)
-8. [The LLM-as-a-Judge Audit Matrix](#-the-llm-as-a-judge-audit-matrix)
-9. [Troubleshooting](#-troubleshooting)
-10. [Roadmap](#-roadmap)
+You upload a call recording (or paste a chat transcript, or drop a file) and within minutes you get a fully structured audit: an agent F1 score, emotional timeline, compliance risk flag, empathy and listening scores, and actionable behavioural coaching nudges — all traceable back to the exact AI model that produced them.
+
+No manual QA. No sampling bias. Every interaction scored consistently.
 
 ---
 
-## 🌟 Project Overview
+## Table of Contents
 
-**Qualora** (formerly known as Briefly) is a cutting-edge AI quality auditing platform designed to process, diarize, and analyze omnichannel customer support interactions. It ingests audio or text, performs deep acoustic profiling (pitch, intensity, emotion), transcribes via competitive asynchronous execution, and utilizes an **LLM-as-a-Judge** framework to score agents on empathy, bias, resolution efficiency, and compliance.
-
-Built for robustness, Qualora utilizes a **Distributed Hybrid Architecture**. Requests race across parallel compute nodes: a free, heavy-duty Hugging Face Space (performing ECAPA-TDNN acoustic diarization and prosody analysis) vs. a high-speed API fallback chain (ElevenLabs → Deepgram → Groq). The fastest valid response wins, guaranteeing **100% uptime and minimal latency**.
-
----
-
-## ✨ Key Capabilities
-
-1. 🎙️ **Multi-Speaker Recognition & Profiling**  
-   Pyannote 3.1 combined with SpeechBrain extracts voiceprints, detects elevated acoustic stress (pitch/intensity via Parselmouth), and classifies physiological emotion directly from the audio envelope.
-   
-2. 🤖 **Competitive Asynchronous Engine**  
-   Simultaneous execution across free-tier compute (HF Space) and premium APIs. Graceful degradation and zero single-point-of-failure.  
-
-3. ⚖️ **LLM-as-a-Judge Auditing**  
-   Evaluates conversations using Llama-3.3-70b (with an automatic failover to OpenRouter's highly-efficient Gemini 2.5 Flash pipeline) to output a structured JSON matrix. Includes an Agent F1 Score, Emotional Timeline, HitL (Human-in-the-Loop) routing flags, and psychologically grounded behavioral nudges.
-
-4. 📊 **Seamless UI & History Archive**  
-   Vanilla JS frontend with an elegant, responsive design. Features real-time job polling, audio playback, and local history archiving.
+1. [How It Works](#how-it-works)
+2. [Audit Output](#audit-output)
+3. [Input Modes](#input-modes)
+4. [Transcription Architecture](#transcription-architecture)
+5. [Audit Engine Cascade](#audit-engine-cascade)
+6. [Getting Started](#getting-started)
+7. [Hugging Face Space Setup](#hugging-face-space-setup)
+8. [Deploying to Vercel](#deploying-to-vercel)
+9. [API Reference](#api-reference)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
-## 🏛️ System Architecture
+## How It Works
 
-Qualora leverages a master-worker pattern. The Flask application acts as the master node, orchestrating long-running transcription tasks through an asynchronous job queue. 
-
-### The Distributed Hybrid "Race"
-
-When a file is uploaded, an async job is generated inside the Flask backend. 
-- **Thread A (The HF Node):** The file is streamed to a private Hugging Face Space running `faster-whisper`, `pyannote`, and `speechbrain`.
-- **Thread B (The API Chain):** The file is sent through a waterfall sequence: ElevenLabs Scribe → Deepgram Nova-2 → Groq Whisper.
-
-The first thread to successfully return a full transcript resolves the job. Once resolved, the **LLM Auditor** kicks in, injecting acoustic context directly into the prompt to ground textual evaluation in biometric reality.
-
-### Workflow Sequence Diagram
-
-```mermaid
-sequenceDiagram
-    participant UI as Browser
-    participant API as Flask Backend
-    participant HF as HF Space Node
-    participant Ext as External APIs
-    participant LLM as LLM Auditor
-    
-    UI->>API: POST /api/start-call-audit
-    API-->>UI: Returns job_id
-    
-    Note over API, Ext: Asynchronous Race Begins (Parallel Execution)
-    
-    API->>HF: Submit audio via gradio_client
-    API->>Ext: Attempt API Fallbacks (ElevenLabs/Deepgram/Groq)
-    
-    HF-->>HF: Transcription and Diarization
-    HF->>API: Return transcript and acoustic profile
-    Ext->>API: Return transcript
-    
-    Note over API: The first successful thread wins
-    
-    UI->>API: GET /api/job/status
-    API-->>UI: Returns status
-    
-    API->>LLM: Pass Transcript and Acoustic Profile
-    LLM-->>API: Return JSON Audit Matrix
-    
-    Note over API: Job marked as done
-    
-    UI->>API: GET /api/job/status
-    API-->>UI: Final Payload
+```
+Upload audio / paste text / drop a file
+        │
+        ▼
+┌───────────────────────────────────────────────────────────┐
+│                  TRANSCRIPTION RACE                       │
+│                                                           │
+│  Thread A ──► HF Space (Faster-Whisper + pyannote)        │
+│  Thread B ──► ElevenLabs Scribe                           │
+│               └─► Deepgram Nova-2 (sequential fallback    │
+│                   └─► Groq Whisper-large-v3  within B)    │
+│                                                           │
+│  First valid transcript wins. The other thread is dropped.│
+└───────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────────────────────────────────────────────┐
+│                    AUDIT CASCADE                          │
+│                                                           │
+│  T1 ─ Groq Llama 3.3 70B (primary, JSON mode)             │
+│  T2 ─ Groq Llama 3.1 8B / Llama 4 Scout / Llama 4 Maverick│
+│  T3 ─ Groq Kimi K2                                        │
+│  T4 ─ OpenRouter Gemini 2.5 Flash  (final safety net)     │
+│                                                           │
+│  Every attempt is tracked — no hardcoded fallback strings.│
+└───────────────────────────────────────────────────────────┘
+        │
+        ▼
+  Structured JSON audit delivered via SSE stream
+  (single open connection — no polling, no state loss)
 ```
 
----
-
-## 🛠️ Technology Stack
-
-| Layer | Technologies |
-|---|---|
-| **Frontend** | Vanilla HTML5, CSS3, JavaScript (ES6+), Fetch API |
-| **Backend** | Python 3.10+, Flask, Threading, Gradio Client |
-| **ASR (On-Premise/HF Node)** | `faster-whisper` (int8), `pyannote/speaker-diarization-3.1` |
-| **Acoustic Analytics** | `speechbrain` (wav2vec2 emotion), `parselmouth` (Praat pitch/intensity) |
-| **External APIs** | ElevenLabs (Scribe), Deepgram (Nova-2), Groq (Whisper + Llama 3) |
+The entire voice pipeline runs over a **single Server-Sent Events (SSE) connection**. The browser opens one long-lived request and receives live progress updates (`hf_transcribing → api_transcribing → auditing`) followed by the final result — no repeated polling, no cross-instance data loss.
 
 ---
 
-## 🚀 Getting Started
+## Audit Output
 
-### Prerequisites
-- Python 3.10 or higher
-- Git
-- Access tokens for required external APIs
-
-### Local Installation
-
-1. **Clone the Repository**
-   ```bash
-   git clone https://github.com/yourusername/qualora.git
-   cd qualora
-   ```
-
-2. **Set up a Virtual Environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install Dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Environment Variables Configuration**
-   
-   Create a `.env` file in the root directory:
-   ```env
-   # LLM Auditor and Whisper Fallback
-   GROQ_API_KEY=gsk_your_groq_key_here
-   OPENROUTER_API_KEY=sk-or-your_openrouter_key_here
-   
-   # API Transcription Fallbacks (Optional but recommended)
-   ELEVENLABS_API_KEY=sk_your_elevenlabs_key_here
-   DEEPGRAM_API_KEY=your_deepgram_key_here
-   MURF_API_KEY=your_murf_key_here
-   
-   # Distributed Compute Node (Hugging Face Space)
-   HF_TOKEN=hf_your_read_token_here
-   HF_SPACE_URL=your_hf_username/briefly-asr-node
-   HF_SPACE_TOKEN=hf_your_read_token_here
-   ```
-
-5. **Start the Development Server**
-   ```bash
-   python app.py
-   ```
-   Navigate to `http://localhost:5000` in your browser.
-
----
-
-## ☁️ Hugging Face Space Node Setup
-
-The HF Space node provides free, GPU/CPU-backed deep analysis (diarization + acoustic processing). 
-
-1. Create a **Private Space** on Hugging Face using the `Docker` SDK.
-2. In the `hf_space/` directory of this repo, push `app.py`, `requirements.txt`, and `Dockerfile` to your Space limit.
-3. Configure the following **Repository Secrets** within your HF Space:
-   - `HF_TOKEN`: Your HuggingFace Read Token (required to download Pyannote).
-   - `WHISPER_MODEL`: e.g., `large-v3` or `medium` (Medium is recommended for faster cold boots on free tiers).
-4. **IMPORTANT**: You must visit the [Pyannote 3.1 Model Page](https://huggingface.co/pyannote/speaker-diarization-3.1) and accept their user agreement to allow the pipeline to download the weights.
-5. In your local `.env`, set `HF_SPACE_URL` to your space (e.g., `prathamamritkar/genAI-qualityBot`).
-
----
-
-## 📡 API Reference
-
-### `POST /api/start-call-audit`
-Upload an audio file to start a background processing job.
-- **Payload**: `multipart/form-data` with `audio` file.
-- **Response**:
-  ```json
-  {
-    "job_id": "4a001249feb54efa8fc52bbce23dea4a",
-    "fallbacks_available": ["elevenlabs", "deepgram", "groq"],
-    "hf_active": true
-  }
-  ```
-
-### `GET /api/job/<job_id>/status`
-Poll the current execution state of a job.
-- **Response Structure (In-Progress)**:
-  ```json
-  {
-    "status": "hf_transcribing",
-    "source": null,
-    "api_chain_started": false,
-    "error": null
-  }
-  ```
-- **Response Structure (Done)**:
-  ```json
-  {
-    "status": "done",
-    "source": "hf_space",
-    "transcript": "Speaker 0: Hello...\n\nSpeaker 1: Hi...",
-    "acoustic_profile": { ... },
-    "audit": { ... }
-  }
-  ```
-
-### `POST /api/job/<job_id>/transcribe-now`
-Manually kick-offs the API Chain fallback sequence if the user does not want to wait for the HuggingFace space cold-boot.
-
----
-
-## 🧠 The LLM-as-a-Judge Audit Matrix
-
-Our evaluation prompts force the LLM to output pure JSON mapping the conversation across psychological and compliance vectors:
+Every audit produces a deterministic JSON matrix:
 
 ```json
 {
-  "summary": "Customer requests immediate refund due to double billing error.",
-  "agent_f1_score": 0.92,
+  "summary": "Customer reported a billing discrepancy; agent resolved without escalation.",
+  "agent_f1_score": 0.91,
   "satisfaction_prediction": "High",
   "compliance_risk": "Green",
   "quality_matrix": {
-    "language_proficiency": 10,
+    "language_proficiency": 9,
     "cognitive_empathy": 8,
     "efficiency": 9,
     "bias_reduction": 10,
     "active_listening": 9
   },
   "emotional_timeline": [
-    {"turn": 1, "speaker": "Customer", "emotion": "Frustrated", "intensity": 8},
-    {"turn": 2, "speaker": "Agent", "emotion": "Empathetic", "intensity": 6}
+    { "turn": 1, "speaker": "Customer", "emotion": "Frustrated", "intensity": 8 },
+    { "turn": 2, "speaker": "Agent",    "emotion": "Empathetic",  "intensity": 6 }
   ],
   "hitl_review_required": false,
   "behavioral_nudges": [
-    "Mirroring: Next time, repeat the specific billing date back to the customer to validate their frustration sooner."
+    "Mirroring: Repeat the specific billing date back to the customer earlier to validate their frustration sooner."
   ]
 }
 ```
-*Note: If acoustic profiling succeeds, physical biometric indicators (e.g., `avg_pitch=280Hz`) are prepended to the LLM's prompt to ground textual emotion inference with real data.*
+
+When the HF Space node wins the transcription race, real acoustic data (average pitch, intensity, detected speaker voiceprints from pyannote) is injected into the audit prompt — grounding the LLM's emotion inferences in biometric reality rather than text alone.
+
+Results are **cached by SHA-256 hash** of the transcript. Identical inputs return identically deterministic results; the cache is cleared endpoint-by-endpoint during test runs.
 
 ---
 
-## 🚧 Troubleshooting
+## Input Modes
 
-- **No Diarization (All tokens assigned to "Speaker 0"):** 
-  You are likely falling back to the Groq API because your HF Space crashed and ElevenLabs/Deepgram aren't configured. Groq's API currently does not support speaker diarization. Fill in the `ELEVENLABS_API_KEY` for premium fallback.
-  
-- **Vercel Serverless Timeouts (`504 Gateway Timeout`):**
-  If deployed to Vercel, traditional sync endpoints fail after 10–60s. Use the asynchronous polling flow (`/api/start-call-audit` + `/api/job/<id>/status`) which handles large files dynamically.
-  
-- **Hugging Face Token Errors (`unexpected keyword argument 'use_auth_token'`):**
-  Ensure your HF Space is running the latest `transformers` library where `token=` has replaced `use_auth_token=`. (Already patched in the latest versions).
+| Mode | Endpoint | Notes |
+|---|---|---|
+| **Voice upload** | `POST /api/start-call-audit` | MP3, WAV, M4A, WebM — up to 50 MB. SSE stream. |
+| **Live recording** | `POST /api/start-call-audit` | Record directly in the browser via MediaRecorder. |
+| **Text / chat transcript** | `POST /api/process-chat` | Paste raw `Agent: / Customer:` formatted text. |
+| **File upload** | `POST /api/process-file` | `.txt` or `.pdf` (text-layer PDFs). |
 
 ---
 
-## 🗺️ Roadmap
+## Transcription Architecture
 
-- **Streaming ASR:** True WebSockets implementation for mid-call auditing.
-- **Voice Synthesis:** Voice cloning and read-back for simulated agent training.
-- **CRM Integration:** Webhook exports directly into Salesforce or Zendesk instances.
-- **Multilingual Models:** Expansion beyond English using SeamlessM4T or Whisper large-v3 language detection.
+Qualora runs two threads the moment an audio file lands:
+
+**Thread A — HF Space (primary)**  
+Streams the file to a private Hugging Face Space running `faster-whisper` (int8 quantisation) and `pyannote/speaker-diarization-3.1`. Returns a speaker-labelled transcript plus an acoustic profile (pitch, intensity, speaker voiceprints).
+
+**Thread B — API Chain (concurrent fallback)**  
+Runs sequentially *within* its thread: ElevenLabs Scribe → Deepgram Nova-2 → Groq Whisper-large-v3. Each provider is only tried if the previous one throws an exception.
+
+**Automatic triggers for Thread B:**
+- User clicks **"Transcribe Now"** — fires Thread B immediately while Thread A is still running
+- Thread A throws any exception — Thread B starts automatically
+- Thread A hasn't responded after **90 seconds** — timeout watcher starts Thread B
+
+The winner (`job["winner"].is_set()`) locks the transcript. The other thread is abandoned. Provider name is recorded exactly (`"Faster-Whisper + pyannote"`, `"ElevenLabs Scribe"`, `"Deepgram Nova-2"`, `"Groq Whisper-large-v3"`) and surfaced in the audit console log and response payload.
 
 ---
 
-## 📄 License & Acknowledgements
+## Audit Engine Cascade
 
-Created for educational, enterprise, and demonstration use. Built with immense gratitude to the open-source ML community:
-* [Pyannote Audio](https://github.com/pyannote/pyannote-audio)
-* [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper)
-* [SpeechBrain](https://speechbrain.github.io/)
+The LLM auditor attempts models in order, tracking every attempt with a failure reason code:
 
-**Qualora: Unlocking the human element of your support data.**
+| Tier | Model | Notes |
+|---|---|---|
+| T1 | Groq `llama-3.3-70b-versatile` | JSON mode. Primary choice. |
+| T2 | Groq `llama-3.1-8b-instant` → `llama-4-scout` → `llama-4-maverick` | Sequential within tier. |
+| T3 | Groq `moonshotai/kimi-k2-instruct` | |
+| T4 | OpenRouter `google/gemini-2.5-flash` | Final safety net — different provider entirely. |
+
+Failure reasons (`rate_limit`, `timeout`, `auth_error`, `json_parse_error`, `http_<code>`) are collected into `audit_attempted_summary` and returned in the response for full transparency. No hardcoded fallback strings at any tier.
+
+---
+
+## Getting Started
+
+### Prerequisites
+- Python 3.10+
+- A Groq API key (free tier works — required for the audit engine)
+- Optionally: ElevenLabs, Deepgram, OpenRouter, and HF Space keys for full cascade coverage
+
+### Installation
+
+```bash
+git clone https://github.com/yourusername/qualora.git
+cd qualora
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS / Linux
+pip install -r requirements.txt
+```
+
+### Environment Variables
+
+Create a `.env` file in the root directory. Values here **always override** OS environment variables (`load_dotenv(override=True)`):
+
+```env
+# ── Audit Engine (required) ───────────────────────────────
+GROQ_API_KEY=gsk_your_groq_key_here
+
+# ── Audit Fallback (recommended) ─────────────────────────
+OPENROUTER_API_KEY=sk-or-your_openrouter_key_here
+
+# ── Transcription API chain (optional — improves coverage) ─
+ELEVENLABS_API_KEY=sk_your_elevenlabs_key_here
+DEEPGRAM_API_KEY=your_deepgram_key_here
+
+# ── HF Space ASR node (optional — enables diarization) ────
+HF_SPACE_URL=your-hf-username/your-space-name
+HF_SPACE_TOKEN=hf_your_read_token_here
+```
+
+> Only `GROQ_API_KEY` is strictly required. The platform degrades gracefully — missing providers are skipped, and Groq Whisper handles transcription if no other API keys are set.
+
+### Run Locally
+
+```bash
+python app.py
+```
+
+Open `http://localhost:5000` in your browser.
+
+---
+
+## Hugging Face Space Setup
+
+The HF Space node provides free speaker diarization and acoustic profiling that the API chain cannot replicate.
+
+1. Create a **Private Space** on Hugging Face using the **Docker** SDK.
+2. Push the contents of the `hf_space/` directory (`app.py`, `requirements.txt`, `Dockerfile`) to your Space.
+3. Add these **Repository Secrets** in your Space settings:
+   - `HF_TOKEN` — your HuggingFace read token (needed to download pyannote weights)
+   - `WHISPER_MODEL` — e.g. `medium` (recommended for free-tier cold boot speed) or `large-v3`
+4. Accept the user agreement on the [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) model page — the pipeline cannot download weights without this.
+5. Set `HF_SPACE_URL` in your local `.env` to match your Space identifier (e.g. `your-username/qualora-asr`).
+
+If the Space is unavailable or not configured, Qualora falls back to the API chain automatically — no manual intervention needed.
+
+---
+
+## Deploying to Vercel
+
+Qualora deploys to Vercel using the `@vercel/python` legacy builder.
+
+```json
+{
+  "version": 2,
+  "builds": [{ "src": "app.py", "use": "@vercel/python" }],
+  "routes": [{ "src": "/(.*)", "dest": "app.py" }]
+}
+```
+
+**Important configuration steps:**
+
+1. Add all environment variables from your `.env` file to **Vercel → Project Settings → Environment Variables**. The `VERCEL_ENV` variable is injected automatically by the platform (used internally to route file uploads to `/tmp`).
+
+2. Set **Max Duration** in **Vercel → Project Settings → Functions** to the highest value your plan allows (60 s on Hobby, up to 800 s on Pro). The SSE stream stays open for the full transcription + audit cycle.
+
+3. The SSE stream emits a `: ping` comment every 15 seconds to prevent Vercel's proxy layer from closing an idle connection mid-transcription.
+
+> **Why SSE and not polling?**  
+> On serverless platforms, each HTTP request can land on a different container instance. A polling approach would create a new instance per poll — none of which share the in-memory job state from the original upload instance. SSE keeps one connection open on the same instance from upload to final result delivery.
+
+---
+
+## API Reference
+
+### `POST /api/start-call-audit`
+Upload audio and receive a live SSE stream of progress events.
+
+**Request:** `multipart/form-data` with field `audio` (file ≤ 50 MB).
+
+**SSE Event stream:**
+```
+data: {"type": "job_started", "job_id": "abc123", "fallbacks_available": ["elevenlabs","groq"], "hf_active": true}
+
+data: {"type": "status", "status": "hf_transcribing", "api_chain_started": false}
+
+data: {"type": "status", "status": "auditing", "api_chain_started": false}
+
+data: {"type": "done", "result_type": "call", "transcription": "...", "audit": {...},
+       "audit_scored_by": "Llama 3.3 70B", "audit_tier": "T1",
+       "transcription_provider": "Faster-Whisper + pyannote", "source": "hf_space", "timestamp": "..."}
+```
+
+On failure: `data: {"type": "error", "error": "...description..."}`
+
+---
+
+### `POST /api/job/<job_id>/transcribe-now`
+Immediately starts the API chain fallback while the HF Space thread is still running. First valid result wins.
+
+**Response:** `{"triggered": true, "providers": ["elevenlabs", "deepgram", "groq"]}`
+
+---
+
+### `POST /api/process-chat`
+Audit a raw text transcript directly.
+
+**Request:** `application/json` — `{"text": "Agent: Hello...\nCustomer: Hi..."}`
+
+**Response:** Full audit payload including `audit_scored_by`, `audit_tier`, `audit_attempted_summary`.
+
+---
+
+### `POST /api/process-file`
+
+
+Upload a `.txt` or `.pdf` file for auditing.
+
+**Request:** `multipart/form-data` with field `file`.
+
+---
+
+### `GET /api/health`
+Returns the configuration status of all nodes and providers.
+
+```json
+{
+  "api_ready": true,
+  "vercel_mode": false,
+  "fallbacks": {
+    "groq": true,
+    "elevenlabs": false,
+    "deepgram": false,
+    "hf_space": true
+  },
+  "transcription_chain": ["groq"],
+  "audit_chain": ["groq", "openrouter"]
+}
+```
+
+---
+
+### `POST /api/admin/clear-cache` *(localhost only)*
+Evicts all entries from the in-process audit result cache. Used by the test suite to force fresh LLM calls between sections.
+
+**Response:** `{"cleared": true, "evicted": 4}`
+
+---
+
+## Troubleshooting
+
+**All speaker turns labelled "Speaker 0" (no diarization)**  
+The HF Space node was unavailable and the API chain handled transcription. Only HF Space (pyannote) produces speaker separation. Configure `HF_SPACE_URL` and ensure the Space is running.
+
+**Vercel SSE stream closes before a result arrives**  
+Upgrade to Vercel Pro for longer function durations (the Hobby plan caps at 60 s). Alternatively, ensure ElevenLabs or Deepgram are configured so transcription completes faster and the audit starts sooner.
+
+**`gradio_client` not installed warning on startup**  
+The HF Space node is disabled but everything else works normally. Install with `pip install gradio_client>=1.3.0` if you want to enable it.
+
+**HuggingFace pyannote download fails (`401 Unauthorized`)**  
+You need to accept the user agreement on [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) and set `HF_TOKEN` in your HF Space secrets.
+
+**`.env` changes not being picked up**  
+Qualora uses `load_dotenv(override=True)` — restart the server and your `.env` will take precedence over any stale OS-level environment variables.
+
+---
+
+## Running the Test Suite
+
+The exhaustive test suite covers every endpoint, every fallback tier, and every provider — using real conversation samples from `datasets/human_chat.txt`. Server-side audit cache is cleared before each section so every test exercises a fresh LLM call.
+
+```bash
+# Server must be running first
+python app.py &
+
+python test_exhaustive.py
+```
+
+---
+
+## License & Acknowledgements
+
+MIT License. Built with gratitude to the open-source ML community:
+
+- [Faster-Whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2-optimised Whisper inference
+- [Pyannote Audio](https://github.com/pyannote/pyannote-audio) — Speaker diarization
+- [SpeechBrain](https://speechbrain.github.io/) — Acoustic emotion classification
+- [Groq](https://groq.com) — Inference API for Llama and Whisper models
+- [ElevenLabs](https://elevenlabs.io) — Scribe transcription with diarization
+- [Deepgram](https://deepgram.com) — Nova-2 transcription
+
+---
+
+<div align="center"><em>Qualora — unlocking the human element of your support data.</em></div>
