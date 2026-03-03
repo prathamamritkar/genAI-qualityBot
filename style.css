@@ -488,6 +488,15 @@ body {
     font-weight: 400;
 }
 
+.modern-textarea:disabled {
+    opacity: 0.38;
+    cursor: not-allowed;
+    pointer-events: none;
+    border-color: var(--md-outline);
+    background: transparent;
+    color: var(--md-on-surface-faint);
+}
+
 /* ── Buttons (MD3) ───────────────────────────────────────────────────── */
 .btn-primary {
     display: inline-flex;
@@ -699,6 +708,11 @@ body {
     color: var(--md-error);
 }
 
+/* KPI card icon tints to match semantic state — icon + value + top-bar all consistent */
+.kpi-card.kpi-green .kpi-icon .material-symbols-rounded { color: var(--md-success); }
+.kpi-card.kpi-amber .kpi-icon .material-symbols-rounded { color: var(--md-warning); }
+.kpi-card.kpi-red   .kpi-icon .material-symbols-rounded { color: var(--md-error);   }
+
 /* ── Summary Card ─────────────────────────────────────────────────────── */
 .summary-card {
     background: var(--md-surface-2);
@@ -729,6 +743,7 @@ body {
 
 .detail-label .material-symbols-rounded {
     font-size: 1rem;
+    color: var(--md-primary-light);
 }
 
 /* ── Visualization Grid ────────────────────────────────────────────────── */
@@ -801,11 +816,35 @@ body {
     border: 1px solid var(--md-outline);
     border-radius: var(--md-corner-lg);
     padding: var(--s4);
+    transition:
+        border-color var(--md-duration-medium) var(--md-easing),
+        box-shadow var(--md-duration-medium) var(--md-easing);
 }
 
 .flags-card {
-    border-color: rgba(239, 68, 68, 0.18);
+    /* border driven by JS riskClass — see .flags-card.kpi-* below */
 }
+
+.flags-card.kpi-green {
+    border-color: rgba(16, 185, 129, 0.22);
+}
+
+.flags-card.kpi-amber {
+    border-color: rgba(245, 158, 11, 0.22);
+}
+
+.flags-card.kpi-red {
+    border-color: rgba(239, 68, 68, 0.28);
+    box-shadow: 0 0 14px rgba(239, 68, 68, 0.06);
+}
+
+/* Flags card header icon tints with live compliance_risk — MD3 adaptive */
+.flags-card.kpi-green .detail-label .material-symbols-rounded { color: var(--md-success); }
+.flags-card.kpi-amber .detail-label .material-symbols-rounded { color: var(--md-warning); }
+.flags-card.kpi-red   .detail-label .material-symbols-rounded { color: var(--md-error);   }
+
+/* Nudges card header icon — constructive amber (coaching, not threat) */
+.nudges-card .detail-label .material-symbols-rounded { color: var(--md-warning); }
 
 /* ── Section Heading (transcript + audio block headers) ───────────────── */
 .section-heading {
@@ -875,6 +914,17 @@ body {
 
 .nudge-item .material-symbols-rounded {
     color: var(--md-warning);
+}
+
+/* All-clear state when no nudges returned — mirrors .no-issue */
+.no-nudges {
+    color: var(--md-success);
+    font-style: italic;
+    opacity: 0.85;
+}
+
+.no-nudges .material-symbols-rounded {
+    color: var(--md-success);
 }
 
 /* ── Transcript Accordion ─────────────────────────────────────────────── */
@@ -1128,12 +1178,30 @@ details[open] .accordion-summary::before {
 }
 
 .item-type {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s1);
     font-weight: 700;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.06em;
     color: var(--md-primary-light);
     background: var(--md-primary-container);
     border-radius: var(--md-corner-full);
     padding: 1px 8px;
+}
+
+.item-type .material-symbols-rounded {
+    font-size: 0.85rem;
+}
+
+/* VOICE badge stays indigo (audio/mic); TEXT badge uses secondary violet (document) */
+.item-type.type-voice {
+    color: var(--md-primary-light);
+    background: var(--md-primary-container);
+}
+
+.item-type.type-text {
+    color: var(--md-secondary-light);
+    background: rgba(139, 92, 246, 0.12);
 }
 
 .item-time {
@@ -1147,10 +1215,17 @@ details[open] .accordion-summary::before {
 }
 
 .item-risk {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s1);
     font-weight: 700;
     letter-spacing: 0.04em;
     padding: 1px 8px;
     border-radius: var(--md-corner-full);
+}
+
+.item-risk .material-symbols-rounded {
+    font-size: 0.85rem;
 }
 
 .item-risk.risk-green {
@@ -1437,9 +1512,34 @@ details[open] .accordion-summary::before {
 }
 
 /* ── Responsive ─────────────────────────────────────────────────────── */
+
+/* Tablet / mid viewport: 641–860px — 2-col KPIs, tighter panel gap */
+@media (max-width: 860px) {
+    .kpi-row {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .kpi-row .kpi-card:nth-child(3):last-child {
+        grid-column: 1 / -1;
+        max-width: calc(50% - var(--s3) / 2);
+        justify-self: start;
+    }
+
+    .result-container {
+        gap: var(--s3);
+    }
+}
+
+/* Mobile: ≤640px */
 @media (max-width: 640px) {
     .kpi-row {
         grid-template-columns: 1fr;
+    }
+
+    .kpi-row .kpi-card:nth-child(3):last-child {
+        grid-column: unset;
+        max-width: unset;
+        justify-self: unset;
     }
 
     .viz-grid {
@@ -1465,8 +1565,45 @@ details[open] .accordion-summary::before {
     .nav-tab span:not(.material-symbols-rounded) {
         display: none;
     }
+
+    .content-panel {
+        padding: var(--s4);
+    }
+
+    .app-header {
+        gap: var(--s3);
+        margin-bottom: var(--s4);
+    }
+
+    .app-logo {
+        width: 42px;
+        height: 42px;
+    }
+
+    .app-title-group h1 {
+        font-size: 1.3rem;
+    }
+
+    .file-name {
+        max-width: min(200px, 40vw);
+    }
+
+    .toast-outlet {
+        right: var(--s3);
+        left: var(--s3);
+        bottom: var(--s4);
+    }
+
+    .modern-toast {
+        max-width: 100%;
+    }
+
+    .history-scroll {
+        max-height: 420px;
+    }
 }
 
+/* Small phone: ≤400px */
 @media (max-width: 400px) {
     .app-container {
         padding-top: calc(36px + var(--s5));
@@ -1475,5 +1612,17 @@ details[open] .accordion-summary::before {
 
     .kpi-value {
         font-size: 1.2rem;
+    }
+
+    .content-panel {
+        padding: var(--s3);
+    }
+
+    .app-title-group h1 {
+        font-size: 1.15rem;
+    }
+
+    .app-tagline {
+        font-size: 0.72rem;
     }
 }

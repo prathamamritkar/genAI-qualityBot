@@ -7,16 +7,16 @@
     <title>Qualora &mdash; AI Customer Support Quality Auditor</title>
     <meta name="description"
         content="Qualora: GenAI-powered quality auditing platform. LLM scoring of empathy, compliance, and resolution effectiveness for customer support.">
-    <link rel="stylesheet" href="style.css?v=3.4">
+    <link rel="stylesheet" href="style.css?v=3.6">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto:wght@400;500;700&display=swap"
         rel="stylesheet">
-    <!-- Material Symbols for MD3 consistent iconography -->
+    <!-- Material Symbols for MD3 consistent iconography — subsetted to icons in use -->
     <link rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=block">
+        href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0..1,0&icon_names=analytics,audio_file,chat,check,chevron_right,cloud_upload,description,fact_check,flag,gpp_bad,history,landscape,mic,policy,radar,sentiment_satisfied,speed,stop_circle,summarize,verified,warning&display=block">
     <!-- Chart.js for 2D Radar Chart -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <!-- Apache ECharts for 3D Topography -->
@@ -203,7 +203,7 @@
                     <div class="audit-details-grid">
                         <div class="audit-detail-card flags-card" id="flags-section">
                             <div class="detail-label">
-                                <span class="material-symbols-rounded">flag</span>
+                                <span class="material-symbols-rounded" id="flags-card-icon">flag</span>
                                 Compliance Flags
                             </div>
                             <ul class="detail-list" id="flags-list"></ul>
@@ -218,41 +218,37 @@
                     </div>
 
                     <!-- Row 5: Decoded Transcript / Document (Progressive Disclosure) -->
-                    <div id="transcription-container" hidden
-                        style="margin-top: 15px; padding: 15px; background: rgba(30, 41, 59, 0.4); border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.1);">
-                        <!-- Custom toggle header — matches audio block styling exactly -->
+                    <div id="transcription-container" class="transcription-container" hidden>
+                        <!-- Custom toggle header -->
                         <div style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;"
                             id="transcription-toggle"
                             onclick="(function(){var t=document.getElementById('transcription-text'); var c=document.getElementById('transcription-chevron'); var v=t.hidden; t.hidden=!v; c.textContent=v?'expand_less':'expand_more';})()">
-                            <div
-                                style="display: flex; align-items: center; gap: 8px; color: #E2E8F0; font-weight: 600; font-size: 0.95rem;">
-                                <span class="material-symbols-rounded" style="color: #6366F1;">description</span>
+                            <div class="section-heading">
+                                <span class="material-symbols-rounded">description</span>
                                 Interaction Transcript
                                 <span class="material-symbols-rounded" id="transcription-chevron"
-                                    style="color: #94A3B8; font-size: 1.1rem;">expand_more</span>
+                                    style="color: var(--md-on-surface-muted); font-size: 1rem; margin-left: var(--s1);">expand_more</span>
                             </div>
                             <button class="btn-secondary" id="download-transcript-btn" type="button"
                                 style="display: inline-flex; width: auto; align-items: center; gap: 6px; padding: 4px 10px; font-size: 0.85rem;"
                                 onclick="event.stopPropagation();">
-                                <span class="material-symbols-rounded" style="font-size: 1.1rem;">download</span>
+                                <span class="material-symbols-rounded">download</span>
                                 Download
                             </button>
                         </div>
                         <div id="transcription-text" hidden
-                            style="margin-top: 15px; background: rgba(15, 23, 42, 0.6); padding: 12px; border-radius: 8px; max-height: 400px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem; color: #CBD5E1;">
+                            style="margin-top: var(--s3); background: rgba(15, 23, 42, 0.6); padding: 12px; border-radius: var(--md-corner-sm); max-height: 400px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem; color: var(--md-on-surface);">
                         </div>
                     </div>
 
                     <!-- Audio Playback -->
-                    <div class="audio-playback-block" id="audio-playback-block" hidden
-                        style="margin-top: 15px; padding: 15px; background: rgba(30, 41, 59, 0.4); border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.1);">
-                        <div
-                            style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px; color: #E2E8F0; font-weight: 600; font-size: 0.95rem;">
-                            <span class="material-symbols-rounded" style="color: #6366F1;">play_circle</span>
+                    <div class="audio-playback-block" id="audio-playback-block" hidden>
+                        <div class="section-heading" style="margin-bottom: var(--s3);">
+                            <span class="material-symbols-rounded">play_circle</span>
                             Audio Recording
                         </div>
                         <audio id="audio-player" controls
-                            style="width: 100%; border-radius: 8px; outline: none;"></audio>
+                            style="width: 100%; border-radius: var(--md-corner-sm); outline: none;"></audio>
                     </div>
 
                     <!-- Row 6: HITL Override Panel -->
@@ -330,7 +326,7 @@
             } catch (e) { localStorage.removeItem('brieflyqa_history'); }
         })();
     </script>
-    <script src="script.js?v=4.3"></script>
+    <script src="script.js?v=4.4" defer></script>
 </body>
 
 </html>

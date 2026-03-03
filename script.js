@@ -333,12 +333,26 @@ async function _readJobStream(response) {
     const reader  = response.body.getReader();
     const decoder = new TextDecoder();
     let   buffer  = '';
-    let   isFastTracked = false;
+    let   isFastTracked  = false;
+    let   _apiChainStart = null;  // tracks elapsed time while api_transcribing
+    let   _elapsedTimer  = null;  // interval handle — cleared on every state transition
+
+    const _clearElapsedTimer = () => {
+        if (_elapsedTimer) { clearInterval(_elapsedTimer); _elapsedTimer = null; }
+        _apiChainStart = null;
+    };
 
     const STATUS_MAP = {
-        'hf_transcribing': 'HF Space transcribing...',
-        'api_transcribing': 'API chain transcribing...',
+        'hf_transcribing': 'Deep analysis in progress...',
+        'api_transcribing': 'Transcribing audio...',
         'auditing':         'AI auditing interaction...',
+    };
+
+    // Internal → display labels for the status bar (no tech-stack names)
+    const STATUS_BAR_LABEL = {
+        'hf_transcribing': 'Transcribing (deep)',
+        'api_transcribing': 'Transcribing (fast)',
+        'auditing':         'Auditing',
     };
 
     try {
@@ -360,7 +374,10 @@ async function _readJobStream(response) {
 
                 if (event.type === 'job_started') {
                     currentJobId = event.job_id;
-                    if (event.fallbacks_available?.length) {
+                    // Only surface Fast Track when HF Space is the primary path AND
+                    // API-chain fallbacks are available to skip to — i.e. Vercel deployment.
+                    // Locally without HF Space the API chain runs directly and is fast; no button needed.
+                    if (event.hf_active && event.fallbacks_available?.length) {
                         UI.tnp.panel.hidden = false;
                         UI.tnp.btn.disabled = false;
                         UI.tnp.btn.onclick = async () => {
@@ -377,13 +394,31 @@ async function _readJobStream(response) {
                     }
 
                 } else if (event.type === 'status') {
-                    UI.loaderText.textContent = STATUS_MAP[event.status] || 'Processing...';
+                    // Don't overwrite the fast-track confirmation message once user clicked the button
+                    if (!isFastTracked || event.status === 'auditing') {
+                        if (event.status === 'api_transcribing') {
+                            // First time entering this state: start a 1-second ticker so the
+                            // user sees elapsed seconds instead of a forever-static message.
+                            if (!_apiChainStart) {
+                                _apiChainStart = Date.now();
+                                _elapsedTimer = setInterval(() => {
+                                    const s = Math.floor((Date.now() - _apiChainStart) / 1000);
+                                    UI.loaderText.textContent = `Transcribing audio\u2026 (${s}s)`;
+                                }, 1000);
+                            }
+                        } else {
+                            // Leaving api_transcribing — stop the ticker before writing new message
+                            _clearElapsedTimer();
+                            UI.loaderText.textContent = STATUS_MAP[event.status] || 'Processing...';
+                        }
+                    }
                     if (UI.statusText) {
                         UI.statusText.textContent =
-                            `[Job ${currentJobId?.substring(0, 6)}] ${(event.status || '').replace(/_/g, ' ')}`;
+                            `[Job ${currentJobId?.substring(0, 6)}] ${STATUS_BAR_LABEL[event.status] || 'Processing'}`;
                     }
 
                 } else if (event.type === 'done') {
+                    _clearElapsedTimer();
                     const res = event;
                     res.type = res.result_type || 'call'; // restore audit result type
                     if (!res.transcription && res.transcript) res.transcription = res.transcript;
@@ -402,11 +437,13 @@ async function _readJobStream(response) {
                     return;
 
                 } else if (event.type === 'error') {
+                    _clearElapsedTimer();
                     throw new Error(event.error || 'Job failed');
                 }
             }
         }
     } finally {
+        _clearElapsedTimer();
         reader.releaseLock();
     }
 }
@@ -557,20 +594,25 @@ function renderAuditDashboard(data) {
 
     // ── Compliance Flags ──────────────────────────────────────────────────
     const flags = Array.isArray(audit.compliance_flags) ? audit.compliance_flags : [];
+    const _rc = riskClass(risk);
+    // Drive card border/glow from live compliance_risk — header icon stays 'flag', CSS tints it
+    UI.results.flagsSection.className = 'audit-detail-card flags-card' + (_rc ? ' ' + _rc : '');
     UI.results.flagsSection.hidden = false;
+    // Item icon severity: gpp_bad for Red violations, warning for Amber
+    const _flagItemIcon = risk === 'Red' && flags.length > 0 ? 'gpp_bad' : 'warning';
     if (flags.length === 0) {
-        UI.results.flagsList.innerHTML = `<li class="detail-item no-issue"><span class="material-symbols-rounded">check_circle</span> No compliance issues detected</li>`;
+        UI.results.flagsList.innerHTML = `<li class="detail-item no-issue"><span class="material-symbols-rounded">check</span> No compliance issues detected</li>`;
     } else {
         UI.results.flagsList.innerHTML = flags.map(f =>
-            `<li class="detail-item flag-item"><span class="material-symbols-rounded">warning</span>${escHtml(f)}</li>`
+            `<li class="detail-item flag-item"><span class="material-symbols-rounded">${_flagItemIcon}</span>${escHtml(f)}</li>`
         ).join('');
     }
 
     // ── Behavioral Nudges ─────────────────────────────────────────────────
     const nudges = Array.isArray(audit.behavioral_nudges) ? audit.behavioral_nudges : [];
     UI.results.nudgesList.innerHTML = nudges.length
-        ? nudges.map(n => `<li class="detail-item nudge-item"><span class="material-symbols-rounded">tips_and_updates</span>${escHtml(n)}</li>`).join('')
-        : '<li class="detail-item">No nudges generated.</li>';
+        ? nudges.map(n => `<li class="detail-item nudge-item"><span class="material-symbols-rounded">chevron_right</span>${escHtml(n)}</li>`).join('')
+        : '<li class="detail-item no-nudges"><span class="material-symbols-rounded">check</span> No improvement nudges — strong performance</li>';
 
     // ── HITL Panel ────────────────────────────────────────────────────────
     UI.hitl.badge.textContent = 'AI Scored';
@@ -944,12 +986,15 @@ function renderArchive() {
         const audit = item.audit || {};
         const f1 = typeof audit.agent_f1_score === 'number' ? (audit.agent_f1_score * 100).toFixed(0) + '%' : '—';
         const risk = audit.compliance_risk || '—';
+        const isVoice = item.type !== 'chat';
+        const typeIcon = isVoice ? 'mic' : 'chat';
+        const riskIcon = risk === 'Red' ? 'gpp_bad' : risk === 'Amber' ? 'warning' : risk === 'Green' ? 'verified' : 'policy';
         return `<div class="history-card" data-id="${item.id}">
             <div class="history-header">
-                <span class="item-type">${item.type === 'chat' ? 'TEXT' : 'VOICE'}</span>
+                <span class="item-type ${isVoice ? 'type-voice' : 'type-text'}"><span class="material-symbols-rounded">${typeIcon}</span>${isVoice ? 'VOICE' : 'TEXT'}</span>
                 <span class="item-time">${formatTimeAgo(new Date(item.timestamp))}</span>
                 <span class="item-f1">F1: ${f1}</span>
-                <span class="item-risk risk-${risk.toLowerCase()}">${risk}</span>
+                <span class="item-risk risk-${risk.toLowerCase()}"><span class="material-symbols-rounded">${riskIcon}</span>${risk}</span>
             </div>
             <div class="item-preview">${escHtml(audit.summary || 'No summary.')}</div>
         </div>`;
