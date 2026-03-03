@@ -1041,11 +1041,11 @@ async function verifyConnection() {
         const st = $('#status-text');
         AppState.isVercel = data.vercel_mode || false;
 
-        if (data.api_ready) st.textContent = 'Qualora Engine: Active';
-        else st.textContent = 'Qualora Engine: Limited Mode';
+        if (data.api_ready) st.textContent = 'System: Ready';
+        else st.textContent = 'System: Limited';
     } catch {
         UI.infoBar.classList.add('status-offline');
-        $('#status-text').textContent = 'Qualora Engine: Offline';
+        $('#status-text').textContent = 'System: Offline';
     }
 }
 

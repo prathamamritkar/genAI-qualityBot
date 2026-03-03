@@ -521,7 +521,7 @@ def generate_quality_audit(transcript: str, acoustic_profile: dict | None = None
 
 
     _FALLBACK = {
-        "summary": "Audit unavailable — LLM engine offline.",
+        "summary": "System unavailable for analysis at this moment.",
         "agent_f1_score": 0.0,
         "satisfaction_prediction": "Unknown",
         "compliance_risk": "Unknown",
@@ -531,7 +531,7 @@ def generate_quality_audit(transcript: str, acoustic_profile: dict | None = None
         },
         "emotional_timeline": [],
         "compliance_flags": [],
-        "behavioral_nudges": ["LLM audit engine was unavailable. Check GROQ_API_KEY."],
+        "behavioral_nudges": ["Please try again later or contact support if the issue persists."],
         "hitl_review_required": True,
     }
 
