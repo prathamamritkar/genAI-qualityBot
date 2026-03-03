@@ -296,16 +296,43 @@ async function processVoiceSignal() {
         if (AppState.isVercel) {
             UI.tnp.status.hidden = false;
             UI.tnp.status.textContent = 'Processing directly on Vercel Node...';
-            const res = await apiFetch('/process-call', { method: 'POST', body: formData });
-            if (AppState.currentAudio) {
-                res.localAudioUrl = URL.createObjectURL(AppState.currentAudio);
-                res.audioName = AppState.currentAudio.name;
+            // Show fast track button and wire up an explicit AbortController to cancel the hanging 
+            // HF Space wait and forcefully trigger a new accelerated API request.
+            UI.tnp.panel.hidden = false;
+            UI.tnp.btn.disabled = false;
+            let abortController = new AbortController();
+            let isFastTracked = false;
+
+            UI.tnp.btn.onclick = async () => {
+                if (isFastTracked) return;
+                isFastTracked = true;
+                UI.tnp.btn.disabled = true;
+                UI.tnp.status.hidden = false;
+                UI.tnp.status.textContent = 'Aborting HF Space wait... Engaging priority queue!';
+                abortController.abort(); // Cancel the synchronous fetch
+
+                try {
+                    abortController = new AbortController(); // fresh token
+                    const fastRes = await apiFetch('/process-call?fast_track=true', {
+                        method: 'POST', body: formData, signal: abortController.signal
+                    });
+                    finishProcessCall(fastRes);
+                } catch (e) {
+                    if (e.name !== 'AbortError') {
+                        UI.tnp.status.textContent = 'Fast-track failed: ' + e.message;
+                    }
+                }
+            };
+
+            try {
+                const res = await apiFetch('/process-call', {
+                    method: 'POST', body: formData, signal: abortController.signal
+                });
+                finishProcessCall(res);
+            } catch (e) {
+                // If the error was just us aborting it to fast-track, suppress it.
+                if (e.name !== 'AbortError') throw e;
             }
-            renderAuditDashboard(res);
-            archiveAudit(res);
-            resetAudioInput();
-            toggleLoader(false);
-            setGlobalLock(false);
             return;
         }
 
@@ -337,7 +364,22 @@ async function processVoiceSignal() {
         notify(err.message, 'error');
         toggleLoader(false);
         setGlobalLock(false);
+        UI.tnp.panel.hidden = true;
     }
+}
+
+// Helper to dry up the resolution step for the synchronous flow
+function finishProcessCall(res) {
+    if (AppState.currentAudio) {
+        res.localAudioUrl = URL.createObjectURL(AppState.currentAudio);
+        res.audioName = AppState.currentAudio.name;
+    }
+    renderAuditDashboard(res);
+    archiveAudit(res);
+    resetAudioInput();
+    toggleLoader(false);
+    setGlobalLock(false);
+    UI.tnp.panel.hidden = true;
 }
 
 async function pollJobStatus(jobId) {

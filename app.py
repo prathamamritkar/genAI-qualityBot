@@ -821,11 +821,14 @@ def process_call():
 
         print(f"[process-call] {filename} ({file_size/1e6:.2f} MB)")
 
+        # Check if user requested immediate API transcription (skipping HF Space queue)
+        is_fast_track = request.args.get('fast_track', 'false').lower() == 'true'
+
         # Waterfall: HF Space → API chain
         transcription = source_node = None
         acoustic_profile = {}
 
-        if HF_SPACE_URL and GRADIO_CLIENT_AVAILABLE:
+        if not is_fast_track and HF_SPACE_URL and GRADIO_CLIENT_AVAILABLE:
             try:
                 result = transcribe_via_hf_space(filepath)
                 transcription    = result.get("transcript", "").strip()
