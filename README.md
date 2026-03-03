@@ -76,45 +76,39 @@ sequenceDiagram
     participant UI as Browser (UI)
     participant API as Flask Backend
     participant HF as HF Space Node
-    participant Ext as External APIs
+    participant EXT as External APIs
     participant LLM as LLM Auditor
 
     UI->>API: POST /api/start-call-audit
-    API-->>UI: Returns job_id, fallbacks_available, hf_active
+    API-->>UI: Returns job_id with status URL
     
-    Note over API,Ext: Asynchronous Transcription Race (Parallel)
+    Note over API,EXT: Asynchronous Transcription Race starts
     
-    par Thread A: HF Space
-        API->>HF: Stream audio via gradio_client
-        HF->>HF: faster-whisper + pyannote + speechbrain
-        HF-->>API: transcript + acoustic_profile
+    par Thread A: HF Space (free-tier)
+        API->>HF: Stream audio file
+        HF->>HF: Run faster-whisper + pyannote + speechbrain
+        HF-->>API: Transcript + acoustic_profile
     and Thread B: API Fallback Chain
-        API->>Ext: Try ElevenLabs Scribe
-        alt Success
-            Ext-->>API: transcript
-        else Failed
-            API->>Ext: Try Deepgram Nova-2
-            alt Success
-                Ext-->>API: transcript
-            else Failed
-                API->>Ext: Try Groq Whisper-large-v3
-                Ext-->>API: transcript
+        API->>EXT: Attempt ElevenLabs Scribe
+        alt ElevenLabs success
+            EXT-->>API: Transcript received
+        else ElevenLabs failed
+            API->>EXT: Attempt Deepgram Nova-2
+            alt Deepgram success
+                EXT-->>API: Transcript received
+            else Deepgram failed
+                API->>EXT: Attempt Groq (last fallback)
+                EXT-->>API: Transcript received
             end
         end
     end
     
-    Note over API: First successful thread wins; other abandoned
+    Note over API: Winner determined, loser thread cancelled
     
-    UI->>API: GET /api/job/&lt;job_id&gt;/status
-    API-->>UI: { status, source, transcript, ... }
+    API->>LLM: Process transcript with acoustic context
+    LLM-->>API: Audit matrix (JSON)
     
-    API->>LLM: POST with transcript + acoustic_profile
-    LLM-->>API: JSON audit matrix
-    
-    Note over API: Job marked as done
-    
-    UI->>API: GET /api/job/&lt;job_id&gt;/status
-    API-->>UI: { status: "done", audit, timestamp, ... }
+    Note over API: Job status marked DONE
 ```
 
 ---
