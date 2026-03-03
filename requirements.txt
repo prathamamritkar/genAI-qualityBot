@@ -13,7 +13,8 @@ PyPDF2==3.0.1
 
 # ── Data validation ───────────────────────────────────────────────────────────
 pydantic==2.12.5
-
+# ── HTTP Client (required for OpenRouter LLM fallback) ─────────────────────────
+requests>=2.31.0
 # ── HuggingFace Space client (competitive execution — optional) ───────────────
 # Required for the HF Space ASR node. Vercel installs this automatically.
 # If Vercel build fails due to this dep, comment it out and the HF node

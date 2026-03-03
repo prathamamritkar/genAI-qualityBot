@@ -735,7 +735,7 @@ def extract_text_from_file(filepath: str, filename: str) -> str:
 # SECTION 6 — API ENDPOINTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.route('/api/process-chat', methods=['POST'][0:0])
+@app.route('/api/process-chat', methods=['POST'])
 def process_chat():
     try:
         data = request.json
@@ -921,9 +921,12 @@ def job_status(job_id):
         'error':             job['error'],
     }
     if job['status'] == 'done':
-        resp['transcript']       = job['transcript']
+        resp['success']          = True
+        resp['type']             = 'call'
+        resp['transcription']    = job['transcript']
         resp['audit']            = job['audit']
         resp['acoustic_profile'] = job['acoustic_profile']
+        resp['timestamp']        = datetime.utcnow().isoformat() + 'Z'
     return jsonify(resp)
 
 

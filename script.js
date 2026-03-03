@@ -407,8 +407,10 @@ async function pollJobStatus(jobId) {
         try {
             const res = await apiFetch(`/job/${jobId}/status`);
             if (res.status === 'done') {
-                res.type = 'call';
-                res.transcription = res.transcript;
+                // Ensure transcription field exists (backward compatibility for both field names)
+                if (!res.transcription && res.transcript) {
+                    res.transcription = res.transcript;
+                }
                 if (AppState.currentAudio) {
                     res.localAudioUrl = URL.createObjectURL(AppState.currentAudio);
                     res.audioName = AppState.currentAudio.name;

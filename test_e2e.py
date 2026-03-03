@@ -84,7 +84,7 @@ def test_call_audit_flow(base_url):
         
         if status == 'done':
             assert_success('audit' in data, "Audit content present in final job data")
-            assert_success('transcript' in data, "Transcript present in final job data")
+            assert_success('transcription' in data, "Transcription present in final job data")
             print(f"Source: {data.get('source')}")
             break
         elif status == 'error':
