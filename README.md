@@ -72,89 +72,125 @@ The **first thread to successfully return a full transcript wins** and locks the
 ### Workflow Sequence Diagram
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant UI as Browser (Qualora UI)
-    participant API as Flask Backend
-    participant HF as HF Space (WhisperX Node)
-    participant EXT as API Fallback Chain
-    participant LLM as LLM Audit Cascade
-
-    UI->>API: POST /api/start-call-audit
-    API-->>UI: job_id + fallbacks_available
-    
-    rect rgb(230, 245, 255)
-    Note over API,EXT: [RACE COMMENCED] Free Node vs Premium Latency
-    par Thread A: HF Space (Deep Analysis)
-        API->>HF: Audio Upload
-        HF->>HF: faster-whisper + pyannote 3.1
-        Note right of HF: High Accuracy Diarization<br/>+ Acoustic Stress Profiling
-        HF-->>API: Transcript + Acoustic Signals
-    and Thread B: API Waterfall (High Availability)
-        API->>EXT: T1: ElevenLabs Scribe
-        EXT-->>API: (Timeout/Fail)
-        API->>EXT: T2: Deepgram Nova-2
-        EXT-->>API: (Timeout/Fail)
-        API->>EXT: T3: Groq Whisper-large-v3
-        EXT-->>API: Transcript (Success)
-    end
-    end
-    
-    Note over API: 🏆 WINNER DECLARED<br/>(First valid transcript locks job)
-    
-    UI->>API: [Optional] Fast Track Button
-    API->>EXT: Immediate Priority API Trigger
-
-    API->>LLM: Enhanced Prompt (Transcript + Biometric Context)
-    
-    rect rgb(255, 250, 240)
-    Note over LLM: [AUDIT CASCADE] Smart Model Switching
-    LLM->>LLM: Try T1: Llama 3.3 70B (JSON Mode)
-    Note right of LLM: If Rate Limited / Failed...
-    LLM->>LLM: Try T2: Llama 3.1 8B / Llama 4 Scout
-    Note right of LLM: If Still Failed...
-    LLM->>LLM: Try T3: OpenRouter Gemini 2.5 Flash
-    end
-    
-    LLM-->>API: Structured Audit (JSON)
-    API-->>UI: ✓ job_status: 'done' + Audit Dashboard 📊
-```
-
-### Fallback Resilience Flowchart
-
-```mermaid
 graph TD
-    Start([Audio/Text Ingest]) --> Type{Input Type?}
-    
-    Type -- Text/File --> Audit[LLM Audit Cascade]
-    Type -- Voice/Call --> Race[[Distributed Hybrid Race]]
-    
-    subgraph Race [Transcription Race]
-        direction LR
-        HFS[HF Space WhisperX]
-        AB[Fast Track Button]
-        API_C[API Fallback Chain]
-        
-        HFS -- "Winner (Free/Diarized)" --> Audit
-        AB -- "Manual Override" --> API_C
-        API_C -- "Winner (Speed/Reliable)" --> Audit
-    end
-    
-    subgraph Audit [Qualora Audit Engine]
+    %% ── ENTRY ─────────────────────────────────────────────────────
+    Start([" 🎙 Audio / Text Ingest"])
+    Start --> Type{Input Type?}
+    %% ── TEXT PATH ─────────────────────────────────────────────────
+    Type -- "Text / File Upload" --> TextPrep["Sanitise + Truncate\n24 000-char limit"]
+    TextPrep --> AuditEntry
+    %% ── VOICE PATH: ENV ROUTER ────────────────────────────────────
+    Type -- "Voice / Call Recording" --> EnvRouter{Deployment\nEnvironment?}
+    %% ── LOCAL: ASYNC JOB SYSTEM ───────────────────────────────────
+    EnvRouter -- "Local / Persistent Server" --> JobStart["POST /start-call-audit\nCreate UUID Job Dict"]
+    JobStart --> JobPoll["Client polls\n/job/:id/status every 2 s"]
+    subgraph AsyncJob ["⚙️  Async Job Engine (Local)"]
         direction TB
-        L70[Llama 3.3 70B - T1]
-        L8[Llama 3.1 8B - T2]
-        L4[Llama 4 Scout - T3]
-        OR[OpenRouter Gemini - T4]
-        
-        L70 -- Fail --> L8
-        L8 -- Fail --> L4
-        L4 -- Fail --> OR
-        OR -- Fail --> Default([Safe Fallback JSON])
+        HFThread["Thread 1 — HF Space\nWhisperX + pyannote"]
+        APIThread["Thread 2 — API Chain\nlazy, on demand"]
+        WinEvent["threading.Event\n winner.set()"]
+        Timer90["Timeout Watcher\n90 s sentinel thread"]
+        AuditWatcher["Audit Watcher thread\nwaits on winner.set()"]
+        HFThread -- "TX ready" --> WinEvent
+        APIThread -- "TX ready" --> WinEvent
+        Timer90 -- "90 s elapsed\nHF not yet done" --> APIThread
+        WinEvent --> AuditWatcher
     end
-    
-    Audit --> Cache[(SHA-256 result cache)]
-    Cache --> UI([Dashboard Render])
+    JobStart --> AsyncJob
+    FastTrack["🟡 Fast-Track Button\n/job/:id/transcribe-now"] -- "POST → sets api_chain_started" --> APIThread
+    JobPoll -- "status=done" --> AuditEntry
+    %% ── VERCEL: SYNC RACE PATH ────────────────────────────────────
+    EnvRouter -- "Vercel (maxDuration 60 s)" --> VercelSync["POST /process-call\nSync waterfall"]
+    subgraph VercelRace ["⚡  Vercel Sync Race"]
+        direction LR
+        VPrimary["Attempt 1\nHF Space first"]
+        AbortCtrl["AbortController\nclient-side"]
+        VFast["Attempt 2\n?fast_track=true"]
+        VPrimary -- "504 or Fast-Track click" --> AbortCtrl
+        AbortCtrl -- "abort + new token" --> VFast
+    end
+    VercelSync --> VercelRace
+    VercelRace -- "first valid response" --> AuditEntry
+    %% ── HF SPACE NODE ─────────────────────────────────────────────
+    subgraph HFSpace ["☁️  HF Space Node"]
+        direction TB
+        Whisper["WhisperX ASR\nword timestamps"]
+        Pyannote["pyannote 3.1\nSpeaker Diarization"]
+        Parsel["parselmouth\nPitch + Intensity"]
+        SpeechBrain["SpeechBrain wav2vec2\nAcoustic Emotion"]
+        AcousticProfile["Acoustic Profile\npitch · intensity · emotion · turns"]
+        Whisper --> Pyannote --> Parsel --> SpeechBrain --> AcousticProfile
+    end
+    HFThread --> HFSpace
+    HFSpace -- "transcript + acoustic_profile" --> WinEvent
+    %% ── API FALLBACK CHAIN ────────────────────────────────────────
+    subgraph APIChain ["🔗  API Fallback Chain"]
+        direction LR
+        EL["ElevenLabs Scribe v1\nword-level + speaker_id"]
+        DG["Deepgram Nova-2\nutterances + diarization"]
+        GW["Groq Whisper\nlarge-v3 → v3-turbo"]
+        EL -- "Fail" --> DG -- "Fail" --> GW
+    end
+    APIThread --> APIChain
+    APIChain -- "plain transcript" --> WinEvent
+    %% ── AUDIT ENGINE ──────────────────────────────────────────────
+    AuditEntry(["🧠  generate_quality_audit()"])
+    subgraph AuditEngine ["🔍  Qualora Audit Engine"]
+        direction TB
+        CacheCheck{SHA-256\nCache Hit?}
+        BuildPrompt["Build Prompt\n+ Acoustic Context preamble"]
+        CacheCheck -- "HIT ⚡" --> CacheReturn["deepcopy cached result"]
+        CacheCheck -- "MISS" --> BuildPrompt
+        subgraph ModelCascade ["Model Cascade — first success wins"]
+            direction TB
+            T1["T1 — Llama 3.3 70B\n12K TPM · json_object mode"]
+            T2a["T2 — Llama 3.1 8B Instant\n14.4K RPD · json_object mode"]
+            T2b["T2 — Llama 4 Scout 17B\n30K TPM · text mode"]
+            T2c["T2 — Llama 4 Maverick 17B\n6K TPM · text mode"]
+            T3["T3 — Kimi K2\n10K TPM · text mode"]
+            T4["T4 — OpenRouter Gemini 2.5 Flash\nREST fallback"]
+            SafeJSON["🛡 Safe Fallback JSON\nall zeros · hitl_review=true"]
+            T1 -- "Rate-limit / Error" --> T2a
+            T2a -- "Rate-limit / Error" --> T2b
+            T2b -- "Rate-limit / Error" --> T2c
+            T2c -- "Rate-limit / Error" --> T3
+            T3 -- "Rate-limit / Error" --> T4
+            T4 -- "Timeout / Error\nor key missing" --> SafeJSON
+        end
+        BuildPrompt --> ModelCascade
+        JSONRepair["_repair_json()\nstrip fences → brace-extract → fix trailing commas → truncate"]
+        DefMerge["_apply_defensive_merge()\nfill missing keys · infer F1 · infer timeline · default nudges"]
+        ModelCascade -- "raw LLM string" --> JSONRepair --> DefMerge
+        DefMerge --> StoreCache["deepcopy → SHA-256 cache\n+ _audit_metadata tag"]
+    end
+    AuditEntry --> CacheCheck
+    StoreCache --> CacheReturn
+    %% ── RESPONSE + DASHBOARD ──────────────────────────────────────
+    CacheReturn --> ResponseShape["API Response\nsuccess · type · timestamp · transcription\naudit dict · scored_by · tier · acoustic_profile"]
+    subgraph Dashboard ["📊  Dashboard Render"]
+        direction LR
+        KPI["KPI Cards\nF1 · Satisfaction · Risk"]
+        Radar["Radar Chart\nQuality Matrix"]
+        Timeline["Emotion Timeline\nECharts"]
+        Flags["Compliance Flags"]
+        Nudges["Behavioral Nudges"]
+        HITL["HITL Review\nApprove · Flag · Reject"]
+        Archive["LocalStorage Archive"]
+        KPI --> Radar --> Timeline --> Flags --> Nudges --> HITL --> Archive
+    end
+    ResponseShape --> Dashboard
+    classDef tier1  fill:#0d5c3a,stroke:#00c875,color:#fff,font-weight:bold
+    classDef tier2  fill:#1a4a2e,stroke:#00c875,color:#ccc
+    classDef tier3  fill:#3a2e00,stroke:#ffc107,color:#fff
+    classDef safe   fill:#5c1a1a,stroke:#ff4444,color:#fff
+    classDef cache  fill:#2a1a4a,stroke:#9c6fff,color:#fff
+    classDef warn   fill:#4a3000,stroke:#ffc107,color:#fff
+    class T1 tier1
+    class T2a,T2b,T2c tier2
+    class T3,T4 tier3
+    class SafeJSON,CacheReturn safe
+    class StoreCache,CacheCheck cache
+    class FastTrack warn
 ```
 ---
 
