@@ -29,7 +29,9 @@ except ImportError:
     print("⚠️  gradio_client not installed — HF Space node will be unavailable.")
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
-load_dotenv()
+# Always override OS-level env vars with values from .env so updated keys
+# take effect on every process restart without manual env clearing.
+load_dotenv(override=True)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -57,19 +59,11 @@ deepgram_client    = DeepgramClient(api_key=DEEPGRAM_API_KEY) if DEEPGRAM_API_KE
 elevenlabs_client  = ElevenLabs(api_key=ELEVENLABS_API_KEY) if ELEVENLABS_API_KEY else None
 
 # ── Upload Folder ─────────────────────────────────────────────────────────────
-# [FIX #2] Vercel serverless writes only to /tmp — enforced here.
-# IS_VERCEL declared below; use raw env check here (any non-empty value = Vercel).
-UPLOAD_FOLDER = '/tmp/uploads' if os.environ.get('VERCEL', '').strip() else os.path.join(BASE_DIR, 'uploads')
+# Vercel's build system auto-injects VERCEL_ENV. Any other value (incl. manual
+# VERCEL=True in .env) must NOT trigger /tmp routing on a local machine.
+_ON_VERCEL = bool(os.environ.get('VERCEL_ENV', '').strip())
+UPLOAD_FOLDER = '/tmp/uploads' if _ON_VERCEL else os.path.join(BASE_DIR, 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# ── Vercel deployment guard ────────────────────────────────────────────────────
-IS_VERCEL = os.environ.get('VERCEL', '').strip().lower() in ('1', 'true', 'yes')
-
-# [FIX #2] On Vercel hobby (10s hard limit), large audio will always time out.
-# This constant is the safe audio size threshold for synchronous API-only processing.
-# Files above this are still accepted but automatically routed to the HF Space node
-# which processes them server-side (no Vercel timeout exposure).
-VERCEL_SAFE_AUDIO_MB = 4.0  # ~4 min of 128kbps MP3
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 1 — HF SPACE NODE (WhisperX + pyannote acoustic diarization)
@@ -273,16 +267,17 @@ def _groq_transcribe(audio_path: str) -> str:
     raise RuntimeError(f"Both Groq Whisper models failed. Last error: {last_err}")
 
 
-def perform_voice_capture_apis(audio_path: str) -> str:
+def perform_voice_capture_apis(audio_path: str) -> tuple:
     """
-    API-chain node: ElevenLabs → Deepgram [FIXED] → Groq.
+    API-chain node: ElevenLabs → Deepgram → Groq.
     Sequential fallback — tries best quality first, degrades gracefully.
+    Returns (transcript: str, provider_label: str).
     """
     # Attempt 1: ElevenLabs Scribe (primary — best quality + speaker diarization)
     if elevenlabs_client:
         try:
             print("--- [API Chain] ElevenLabs Scribe ---")
-            return _elevenlabs_transcribe(audio_path)
+            return _elevenlabs_transcribe(audio_path), "ElevenLabs Scribe"
         except Exception as e:
             print(f"⚠️  [ElevenLabs] {e}")
 
@@ -290,7 +285,7 @@ def perform_voice_capture_apis(audio_path: str) -> str:
     if deepgram_client:
         try:
             print("--- [API Chain] Deepgram Nova-2 ---")
-            return _deepgram_transcribe(audio_path)
+            return _deepgram_transcribe(audio_path), "Deepgram Nova-2"
         except Exception as e:
             print(f"⚠️  [Deepgram] {e}")
 
@@ -298,13 +293,13 @@ def perform_voice_capture_apis(audio_path: str) -> str:
     if groq_client:
         try:
             print("--- [API Chain] Groq Whisper-large-v3 ---")
-            return _groq_transcribe(audio_path)
+            return _groq_transcribe(audio_path), "Groq Whisper-large-v3"
         except Exception as e:
             print(f"⚠️  [Groq] {e}")
 
     if not (elevenlabs_client or deepgram_client or groq_client):
         raise RuntimeError("No transcription providers configured. Please add GROQ_API_KEY to your Vercel Environment Variables.")
-        
+
     raise RuntimeError("All configured API-chain transcription providers failed to process the audio.")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -347,13 +342,14 @@ def _run_api_chain_for_job(job_id: str):
 
     def _run():
         try:
-            tx = perform_voice_capture_apis(job["_filepath"])
+            tx, provider = perform_voice_capture_apis(job["_filepath"])
             tx = (tx or "").strip()
             if tx and not job["winner"].is_set():
-                job["transcript"] = tx
-                job["source"]     = "api_chain"
+                job["transcript"]            = tx
+                job["source"]                = "api_chain"
+                job["transcription_provider"] = provider
                 job["winner"].set()
-                print(f"[Job {job_id[:8]}] API chain won.")
+                print(f"[Job {job_id[:8]}] API chain won via {provider}.")
         except Exception as e:
             print(f"[Job {job_id[:8]}] API chain failed: {e}")
             if not job["winner"].is_set():
@@ -370,17 +366,18 @@ def _start_job(audio_filepath: str) -> dict:
     import time
     job_id = uuid.uuid4().hex
     job = {
-        "job_id":            job_id,
-        "_ts":               time.time(),
-        "_filepath":         audio_filepath,
-        "status":            "hf_transcribing",
-        "transcript":        None,
-        "source":            None,
-        "acoustic_profile":  {},
-        "audit":             None,
-        "error":             None,
-        "api_chain_started": False,
-        "winner":            threading.Event(),
+        "job_id":                job_id,
+        "_ts":                   time.time(),
+        "_filepath":             audio_filepath,
+        "status":                "hf_transcribing",
+        "transcript":            None,
+        "source":                None,
+        "transcription_provider": None,
+        "acoustic_profile":      {},
+        "audit":                 None,
+        "error":                 None,
+        "api_chain_started":     False,
+        "winner":                threading.Event(),
     }
     _jobs[job_id] = job
     _clean_old_jobs()
@@ -392,9 +389,10 @@ def _start_job(audio_filepath: str) -> dict:
             tx  = result.get("transcript", "").strip()
             apr = result.get("speaker_profiles", {})
             if tx and not job["winner"].is_set():
-                job["transcript"]       = tx
-                job["acoustic_profile"] = apr
-                job["source"]           = "hf_space"
+                job["transcript"]            = tx
+                job["acoustic_profile"]      = apr
+                job["source"]                = "hf_space"
+                job["transcription_provider"] = "Faster-Whisper + pyannote"
                 job["winner"].set()
                 print(f"[Job {job_id[:8]}] HF Space won.")
         except Exception as e:
@@ -536,9 +534,12 @@ _AUDIT_CACHE = {}
 def _repair_json(raw: str) -> dict:
     """Best-effort JSON repair for LLM responses that contain minor syntax errors."""
     # 1. Strip markdown fences
-    if raw.startswith("```json"): raw = raw[7:]
-    if raw.startswith("```"):     raw = raw[3:]
-    if raw.endswith("```"):       raw = raw[:-3]
+    for fence in ("```json", "```JSON", "```"):
+        if raw.startswith(fence):
+            raw = raw[len(fence):]
+            break
+    if raw.endswith("```"):
+        raw = raw[:-3]
     raw = raw.strip()
 
     # 2. Extract outermost JSON object
@@ -553,25 +554,33 @@ def _repair_json(raw: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # 4. Fix trailing commas before ] or }     (common Gemini issue)
+    # 4. Fix trailing commas before ] or }  (common Gemini issue)
     fixed = _re.sub(r',\s*([}\]])', r'\1', raw)
     try:
         return json.loads(fixed)
     except json.JSONDecodeError:
         pass
 
-    # 5. Remove unescaped literal newlines inside strings
-    fixed2 = _re.sub(r'(?<!\\)\n', ' ', fixed)
+    # 5. Remove unescaped literal newlines + tabs inside strings
+    fixed2 = _re.sub(r'(?<!\\)[\n\r]', ' ', fixed)
+    fixed2 = fixed2.replace('\t', ' ')
     try:
         return json.loads(fixed2)
     except json.JSONDecodeError:
         pass
 
-    # 6. Truncate to last valid } and retry
-    for i in range(len(fixed2) - 1, -1, -1):
-        if fixed2[i] == '}':
+    # 6. Strip non-printable control characters (except space)
+    fixed3 = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', fixed2)
+    try:
+        return json.loads(fixed3)
+    except json.JSONDecodeError:
+        pass
+
+    # 7. Truncate to last valid } and retry
+    for i in range(len(fixed3) - 1, -1, -1):
+        if fixed3[i] == '}':
             try:
-                return json.loads(fixed2[:i + 1])
+                return json.loads(fixed3[:i + 1])
             except json.JSONDecodeError:
                 continue
 
@@ -593,19 +602,42 @@ def generate_quality_audit(transcript: str, acoustic_profile: dict | None = None
 
 
     _FALLBACK = {
-        "summary": "System unavailable for analysis at this moment.",
+        "summary": "Automated audit unavailable — all configured judge models were exhausted or unreachable.",
         "agent_f1_score": 0.0,
-        "satisfaction_prediction": "Unknown",
-        "compliance_risk": "Unknown",
+        "satisfaction_prediction": "Unscored",
+        "compliance_risk": "Unscored",
         "quality_matrix": {
             "language_proficiency": 0, "cognitive_empathy": 0,
             "efficiency": 0, "bias_reduction": 0, "active_listening": 0
         },
         "emotional_timeline": [],
         "compliance_flags": [],
-        "behavioral_nudges": ["Please try again later or contact support if the issue persists."],
+        "behavioral_nudges": [],
         "hitl_review_required": True,
+        # _audit_metadata is injected dynamically just before returning
     }
+
+    # Live audit attempt registry — populated as each model is tried
+    _attempted: list[dict] = []
+
+    def _build_exhaustion_metadata() -> dict:
+        """Construct audit metadata from actual attempt history."""
+        if not _attempted:
+            reason = (
+                "groq_not_configured" if not groq_client else
+                "openrouter_not_configured" if not OPENROUTER_API_KEY else
+                "no_models_attempted"
+            )
+            return {"model_id": "none", "model_label": f"No judge models available [{reason}]",
+                    "tier": "!", "attempted": []}
+        summary = "; ".join(f"{m['label']} [{m['reason']}]" for m in _attempted)
+        return {
+            "model_id":         "exhausted",
+            "model_label":      f"All {len(_attempted)} judge(s) exhausted",
+            "tier":             "!",
+            "attempted":        _attempted,
+            "attempted_summary": summary,
+        }
 
     MAX_CHARS = 24_000          # covers ~20 min call; well within Groq 128K context
     if len(transcript) > MAX_CHARS:
@@ -752,9 +784,8 @@ def generate_quality_audit(transcript: str, acoustic_profile: dict | None = None
                         {"role": "user",   "content": user_prompt},
                     ],
                     temperature=0.0,
-                    max_tokens=2048,
+                    max_completion_tokens=2048,
                 )
-                # Only pass response_format to models confirmed to support json_object
                 if supports_json:
                     call_kwargs["response_format"] = {"type": "json_object"}
 
@@ -763,11 +794,11 @@ def generate_quality_audit(transcript: str, acoustic_profile: dict | None = None
                 try:
                     audit = _repair_json(raw)
                 except (ValueError, json.JSONDecodeError) as parse_err:
+                    _attempted.append({"label": model_label, "tier": f"T{tier}", "reason": "json_parse_error"})
                     print(f"⚠️  [Audit] JSON parse failed on {model_label}: {parse_err}. Trying next model.")
                     continue
                 print(f"✅ [Audit] Quality audit complete via {tier_str} {model_label}.")
                 final_audit = _apply_defensive_merge(audit)
-                # Store model metadata for traceability
                 final_audit['_audit_metadata'] = {
                     'model_id':    model_id,
                     'model_label': model_label,
@@ -780,18 +811,29 @@ def generate_quality_audit(transcript: str, acoustic_profile: dict | None = None
                 err_str = str(e).lower()
                 tier = model_meta.get("tier", 99)
                 if "rate_limit" in err_str or "rate limit" in err_str or "429" in err_str:
+                    reason = "rate_limit"
                     print(f"⚠️  [Audit] [T{tier}] Rate limit on {model_label} — trying next model.")
                 elif "response_format" in err_str or "json_object" in err_str or "not support" in err_str:
+                    reason = "json_mode_unsupported"
                     print(f"⚠️  [Audit] [T{tier}] {model_label} does not support json_object — trying next model.")
+                elif "timeout" in err_str or "timed out" in err_str:
+                    reason = "timeout"
+                    print(f"⚠️  [Audit] [T{tier}] {model_label} timed out — trying next model.")
+                elif "401" in err_str or "unauthorized" in err_str or "invalid api" in err_str:
+                    reason = "auth_error"
+                    print(f"⚠️  [Audit] [T{tier}] {model_label} auth error — trying next model.")
                 else:
-                    print(f"⚠️  [Audit] [T{tier}] {model_label} failed: {e} — trying next model.")
+                    reason = type(e).__name__
+                    print(f"⚠️  [Audit] [T{tier}] {model_label} failed ({reason}): {e} — trying next model.")
+                _attempted.append({"label": model_label, "tier": f"T{tier}", "reason": reason})
                 continue
 
-        print("⚠️  [Audit] All Groq models exhausted — falling back to OpenRouter.")
+        print(f"⚠️  [Audit] All {len(_attempted)} Groq model(s) exhausted — escalating to OpenRouter.")
 
-    # ── OPENROUTER FALLBACK ──
+    # ── OPENROUTER ESCALATION ──
     if not OPENROUTER_API_KEY:
-        print("⚠️  [Audit] OpenRouter not configured (OPENROUTER_API_KEY not set). Returning fallback.")
+        print("⚠️  [Audit] OpenRouter not configured (OPENROUTER_API_KEY missing).")
+        _FALLBACK["_audit_metadata"] = _build_exhaustion_metadata()
         return _FALLBACK
 
     _or_model   = "google/gemini-2.5-flash"
@@ -800,43 +842,71 @@ def generate_quality_audit(transcript: str, acoustic_profile: dict | None = None
     print(f"--- [Audit] Attempting OpenRouter Fallback (model={_or_model}, timeout={_or_timeout}s) ---")
     try:
         import requests as _requests  # lazy — only needed for OpenRouter fallback
+        _or_payload = {
+            "model": _or_model,
+            "messages": [
+                {"role": "system", "content": _AUDIT_SYSTEM_PROMPT},
+                {"role": "user",   "content": user_prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.0,
+            "max_tokens": _or_tokens
+        }
         resp = _requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": _or_model,
-                "messages": [
-                    {"role": "system", "content": _AUDIT_SYSTEM_PROMPT},
-                    {"role": "user",   "content": user_prompt},
-                ],
-                # NOTE: response_format NOT set — Gemini via OpenRouter ignores it and
-                # may return a 400. The system prompt already instructs JSON-only output.
-                "temperature": 0.0,
-                "max_tokens": _or_tokens
-            },
+            json=_or_payload,
             timeout=_or_timeout
         )
+        # Some models via OpenRouter reject json_object mode — retry without it
+        if resp.status_code == 400 and "response_format" in resp.text:
+            print(f"[Audit] OpenRouter: model rejected json_object mode, retrying without.")
+            _or_payload.pop("response_format", None)
+            resp = _requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=_or_payload,
+                timeout=_or_timeout
+            )
         if resp.status_code == 200:
             raw = resp.json()["choices"][0]["message"]["content"].strip()
+            or_label = _or_model.split('/')[-1]
             try:
                 audit = _repair_json(raw)
             except (ValueError, json.JSONDecodeError) as parse_err:
+                _attempted.append({"label": or_label, "tier": "OR", "reason": "json_parse_error"})
                 print(f"⚠️  [Audit] OpenRouter JSON repair failed: {parse_err}")
+                _FALLBACK["_audit_metadata"] = _build_exhaustion_metadata()
                 return _FALLBACK
             print(f"✅ [Audit] Quality audit complete via OpenRouter ({_or_model}).")
             final_audit = _apply_defensive_merge(audit)
+            final_audit['_audit_metadata'] = {
+                'model_id':    _or_model,
+                'model_label': or_label,
+                'tier':        'OR',
+            }
             _AUDIT_CACHE[cache_key] = copy.deepcopy(final_audit)
             return final_audit
         else:
+            or_label = _or_model.split('/')[-1]
+            _attempted.append({"label": or_label, "tier": "OR", "reason": f"http_{resp.status_code}"})
             print(f"⚠️  [Audit] OpenRouter failed with {resp.status_code}: {resp.text[:300]}")
     except _requests.exceptions.Timeout:
+        or_label = _or_model.split('/')[-1]
+        _attempted.append({"label": or_label, "tier": "OR", "reason": "timeout"})
         print(f"⚠️  [Audit] OpenRouter timed out after {_or_timeout}s.")
     except Exception as e:
+        or_label = _or_model.split('/')[-1]
+        _attempted.append({"label": or_label, "tier": "OR", "reason": type(e).__name__})
         print(f"⚠️  [Audit] OpenRouter call failed: {e}")
 
+    _FALLBACK["_audit_metadata"] = _build_exhaustion_metadata()
     return _FALLBACK
 
 
@@ -882,20 +952,24 @@ def process_chat():
         audit = generate_quality_audit(text)
         
         # Extract & log which model scored this audit
-        audit_meta = audit.pop('_audit_metadata', {})
-        model_label = audit_meta.get('model_label', 'Unknown')
-        tier = audit_meta.get('tier', '?')
+        audit_meta  = audit.pop('_audit_metadata', {})
+        model_label = audit_meta.get('model_label') or None
+        tier        = audit_meta.get('tier')        or None
+        attempted   = audit_meta.get('attempted_summary')
         print(f"[process-chat] Audit scored by [T{tier}] {model_label}")
-        
-        return jsonify({
-            'success': True,
-            'type': 'chat',
+
+        response_payload = {
+            'success':      True,
+            'type':         'chat',
             'audit_scored_by': model_label,
-            'audit_tier': tier,
+            'audit_tier':   tier,
             'original_text': text,
-            'audit': audit,
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
-        })
+            'audit':        audit,
+            'timestamp':    datetime.utcnow().isoformat() + 'Z',
+        }
+        if attempted:
+            response_payload['audit_attempted_summary'] = attempted
+        return jsonify(response_payload)
     except Exception as e:
         print(f"⚠️  [process-chat] Failed: {str(e)}")
         return jsonify({'error': str(e)}), 500
@@ -935,20 +1009,24 @@ def process_file():
         audit = generate_quality_audit(text)
         
         # Extract & log which model scored this audit
-        audit_meta = audit.pop('_audit_metadata', {})
-        model_label = audit_meta.get('model_label', 'Unknown')
-        tier = audit_meta.get('tier', '?')
+        audit_meta  = audit.pop('_audit_metadata', {})
+        model_label = audit_meta.get('model_label') or None
+        tier        = audit_meta.get('tier')        or None
+        attempted   = audit_meta.get('attempted_summary')
         print(f"[process-file] Audit scored by [T{tier}] {model_label}")
-        
-        return jsonify({
+
+        response_payload = {
             'success':       True,
             'type':          'chat',
             'audit_scored_by': model_label,
-            'audit_tier': tier,
+            'audit_tier':    tier,
             'original_text': text,
             'audit':         audit,
             'timestamp':     datetime.utcnow().isoformat() + 'Z',
-        })
+        }
+        if attempted:
+            response_payload['audit_attempted_summary'] = attempted
+        return jsonify(response_payload)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -982,8 +1060,8 @@ def process_call():
         # Check if user requested immediate API transcription (skipping HF Space queue)
         is_fast_track = request.args.get('fast_track', 'false').lower() == 'true'
 
-        # Waterfall: HF Space → API chain
-        transcription = source_node = None
+        # Waterfall: HF Space → API chain (same on every environment)
+        transcription = source_node = transcription_provider = None
         acoustic_profile = {}
 
         if not is_fast_track and HF_SPACE_URL and GRADIO_CLIENT_AVAILABLE:
@@ -992,13 +1070,14 @@ def process_call():
                 transcription    = result.get("transcript", "").strip()
                 acoustic_profile = result.get("speaker_profiles", {})
                 source_node      = "hf_space"
+                transcription_provider = "Faster-Whisper + pyannote"
                 print(f"[process-call] HF Space OK")
             except Exception as e:
                 print(f"[process-call] HF Space failed, falling back: {e}")
 
         if not transcription:
-            transcription = perform_voice_capture_apis(filepath)
-            source_node   = "api_chain"
+            transcription, transcription_provider = perform_voice_capture_apis(filepath)
+            source_node = "api_chain"
 
         try: os.remove(filepath)
         except Exception: pass
@@ -1006,15 +1085,28 @@ def process_call():
         print(f"[process-call] Auditing (source: {source_node})...")
         audit = generate_quality_audit(transcription, acoustic_profile=acoustic_profile)
 
-        return jsonify({
-            'success':          True,
-            'type':             'call',
-            'transcription':    transcription,
-            'audit':            audit,
-            'source_node':      source_node,
-            'acoustic_profile': acoustic_profile,
-            'timestamp':        datetime.utcnow().isoformat() + 'Z',
-        })
+        # Extract metadata — same contract as /api/job/<id>/status
+        audit_meta  = audit.pop('_audit_metadata', {})
+        model_label = audit_meta.get('model_label') or None
+        tier        = audit_meta.get('tier')        or None
+        attempted   = audit_meta.get('attempted_summary')
+
+        response_payload = {
+            'success':               True,
+            'type':                  'call',
+            'transcription':         transcription,
+            'audit':                 audit,
+            'source':                source_node,        # unified — matches job status response
+            'source_node':           source_node,        # kept for any legacy consumers
+            'transcription_provider': transcription_provider,
+            'audit_scored_by':       model_label,
+            'audit_tier':            tier,
+            'acoustic_profile':      acoustic_profile,
+            'timestamp':             datetime.utcnow().isoformat() + 'Z',
+        }
+        if attempted:
+            response_payload['audit_attempted_summary'] = attempted
+        return jsonify(response_payload)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1073,14 +1165,18 @@ def job_status(job_id):
         # deepcopy to avoid mutating cached/shared job audit dict
         audit_copy = copy.deepcopy(job['audit'] or {})
         audit_meta = audit_copy.pop('_audit_metadata', {})
-        resp['success']          = True
-        resp['type']             = 'call'
-        resp['transcription']    = job['transcript']
-        resp['audit']            = audit_copy
-        resp['acoustic_profile'] = job['acoustic_profile']
-        resp['timestamp']        = datetime.utcnow().isoformat() + 'Z'
-        resp['audit_scored_by']  = audit_meta.get('model_label', 'Unknown')
-        resp['audit_tier']       = audit_meta.get('tier', '?')
+        resp['success']                = True
+        resp['type']                   = 'call'
+        resp['transcription']          = job['transcript']
+        resp['audit']                  = audit_copy
+        resp['acoustic_profile']       = job['acoustic_profile']
+        resp['timestamp']              = datetime.utcnow().isoformat() + 'Z'
+        resp['audit_scored_by']        = audit_meta.get('model_label') or None
+        resp['audit_tier']             = audit_meta.get('tier') or None
+        resp['transcription_provider'] = job.get('transcription_provider') or job.get('source') or None
+        _attempted_sum = audit_meta.get('attempted_summary')
+        if _attempted_sum:
+            resp['audit_attempted_summary'] = _attempted_sum
     return jsonify(resp)
 
 
@@ -1136,7 +1232,7 @@ def health():
             'primary':  'groq'    if GROQ_API_KEY    else None,
             'fallback': 'deepgram' if DEEPGRAM_API_KEY else None,
         },
-        'vercel_mode': IS_VERCEL,
+        'vercel_mode': _ON_VERCEL,
         'api_ready': bool(hf_node_configured or transcription_chain),
         'fallbacks': {
             'hf_space':   hf_node_configured,

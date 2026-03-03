@@ -294,7 +294,12 @@
 
             <!-- Loading Overlay -->
             <div class="app-overlay-loader" id="loader" hidden>
-                <div class="m3-spinner"></div>
+                <div class="spinner-wrap">
+                    <div class="m3-spinner"></div>
+                    <span class="ft-badge" id="ft-badge" hidden>
+                        <span class="material-symbols-rounded">bolt</span>
+                    </span>
+                </div>
                 <p id="loader-text" class="loader-msg">Analyzing interaction...</p>
 
                 <!-- Transcribe Now fallback — shown seamlessly alongside the loader during slow processing -->
@@ -304,7 +309,6 @@
                         <span class="material-symbols-rounded">bolt</span>
                         <span id="transcribe-now-label">Fast Track</span>
                     </button>
-                    <p class="tnp-status" id="tnp-status" hidden></p>
                 </div>
             </div>
         </main>
@@ -326,7 +330,7 @@
             } catch (e) { localStorage.removeItem('brieflyqa_history'); }
         })();
     </script>
-    <script src="script.js?v=3.6"></script>
+    <script src="script.js?v=4.2"></script>
 </body>
 
 </html>

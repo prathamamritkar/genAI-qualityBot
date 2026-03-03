@@ -1,5 +1,5 @@
 /* ========================================================================
-   BRIEFLY QA — CORE LOGIC V3 (Milestone 2)
+   BRIEFLY QA — CORE LOGIC V4.2
    Architecture: Audit-First, Chart-Driven, HITL-Ready
    ======================================================================== */
 
@@ -33,7 +33,6 @@ const AppState = {
     isProcessing: false,
     lastAudit: null,
     hitlStatus: null,  // 'approved' | 'flagged' | 'rejected' | null
-    isVercel: false,   // Vercel disables async background jobs; fallback to sync endpoint
 };
 
 // ── DOM Shortcuts ──────────────────────────────────────────────────────────
@@ -102,7 +101,6 @@ const UI = {
         panel: $('#transcribe-now-panel'),
         btn: $('#transcribe-now-btn'),
         label: $('#tnp-node-label'),
-        status: $('#tnp-status'),
         hint: $('#tnp-hint')
     },
     infoBar: $('#app-status-bar'),
@@ -129,6 +127,20 @@ function setGlobalLock(lock) {
     });
     UI.chat.input.disabled = lock || !!AppState.chatDoc;
     syncInteractiveState();
+}
+
+// ── Fast-Track Visual Indicator ──────────────────────────────────────────
+function activateFastTrackVisual() {
+    UI.overlayLoader.classList.add('fast-tracked');
+    const badge = document.getElementById('ft-badge');
+    if (badge) {
+        badge.hidden = false;
+        // Re-trigger animation on repeat clicks
+        badge.style.animation = 'none';
+        void badge.offsetWidth;
+        badge.style.animation = '';
+    }
+    UI.loaderText.textContent = '⚡ Fast Track Active — Processing...';
 }
 
 // ── View Router ───────────────────────────────────────────────────────────
@@ -284,80 +296,20 @@ async function processVoiceSignal() {
     setGlobalLock(true);
     UI.tnp.panel.hidden = true;
     UI.tnp.btn.disabled = true;
-    UI.tnp.status.hidden = true;
-    UI.tnp.hint.textContent = ''; // Hidden in UI, erased for safety
+    UI.tnp.hint.textContent = '';
 
     try {
         const formData = new FormData();
         formData.append('audio', AppState.currentAudio);
 
-        // Vercel handles long requests by severing the connection after maxDuration (60s).
-        // To respect the fallback hierarchy, we TRY the primary HF Space first.
-        // If HF Space doesn't finish within 50s, we programmatically abort it and 
-        // fallback to the fast API chain, preventing a hard unrecoverable 504 dead-end.
-        if (AppState.isVercel) {
-            UI.tnp.status.hidden = false;
-            UI.tnp.status.textContent = 'Processing directly on Vercel Node (primary)...';
-
-            UI.tnp.panel.hidden = false;
-            UI.tnp.btn.disabled = false;
-            let abortController = new AbortController();
-            let isFastTracked = false;
-
-            const triggerFallback = async (reason) => {
-                if (isFastTracked) return;
-                isFastTracked = true;
-                UI.tnp.btn.disabled = true;
-                UI.tnp.status.hidden = false;
-                UI.tnp.status.textContent = `${reason} — Engaging fast API fallback chain...`;
-                abortController.abort(); // Cancel the hanging primary fetch
-
-                try {
-                    abortController = new AbortController(); // fresh token
-                    const fastRes = await apiFetch('/process-call?fast_track=true', {
-                        method: 'POST', body: formData, signal: abortController.signal
-                    });
-                    finishProcessCall(fastRes);
-                } catch (e) {
-                    if (e.name !== 'AbortError') throw e; // Bubble to outer catch
-                }
-            };
-
-            UI.tnp.btn.onclick = () => triggerFallback('Fast-track activated').catch(e => {
-                notify('API Chain Failed: ' + e.message, 'error');
-                toggleLoader(false);
-                setGlobalLock(false);
-                UI.tnp.panel.hidden = true;
-            });
-
-            try {
-                // Attempt standard waterfall (HF Space first!)
-                // We wait indefinitely here on the client side. If Vercel issues a 504 
-                // Gateway Timeout for exceeding container limits, the catch block intercepts it.
-                const res = await apiFetch('/process-call', {
-                    method: 'POST', body: formData, signal: abortController.signal
-                });
-                finishProcessCall(res);
-            } catch (e) {
-                // If we aborted it manually, ignore the error
-                if (e.name !== 'AbortError') {
-                    // If Vercel physically cut off the connection with 504 Timeout, seamlessly catch it and fallback.
-                    if (e.message.includes('504') || e.message.includes('Timeout')) {
-                        await triggerFallback('Vercel Timeout intercepted');
-                    } else {
-                        throw e; // Standard 500 error / unhandled issue
-                    }
-                }
-            }
-            return;
-        }
-
-        // Standard backend polling approach for local / persistent servers
+        // Always use async job polling — works identically on local and Vercel.
+        // HF Space fires immediately in a background thread; API chain fires
+        // concurrently when the user clicks "Transcribe Now" or after 90s timeout.
         const res = await apiFetch('/start-call-audit', { method: 'POST', body: formData });
         currentJobId = res.job_id;
 
         let isFastTracked = false;
-        if (res.fallbacks_available) {
+        if (res.fallbacks_available?.length) {
             UI.tnp.panel.hidden = false;
             UI.tnp.btn.disabled = false;
 
@@ -365,12 +317,11 @@ async function processVoiceSignal() {
                 if (!currentJobId || isFastTracked) return;
                 isFastTracked = true;
                 UI.tnp.btn.disabled = true;
-                UI.tnp.status.hidden = false;
-                UI.tnp.status.textContent = 'Engaging priority queue...';
+                activateFastTrackVisual();
                 try {
                     await apiFetch(`/job/${currentJobId}/transcribe-now`, { method: 'POST' });
                 } catch (e) {
-                    UI.tnp.status.textContent = 'Fast-track failed: ' + e.message;
+                    UI.loaderText.textContent = '⚠️ Fast-track failed: ' + e.message;
                 }
             };
         }
@@ -383,20 +334,6 @@ async function processVoiceSignal() {
         setGlobalLock(false);
         UI.tnp.panel.hidden = true;
     }
-}
-
-// Helper to dry up the resolution step for the synchronous flow
-function finishProcessCall(res) {
-    if (AppState.currentAudio) {
-        res.localAudioUrl = URL.createObjectURL(AppState.currentAudio);
-        res.audioName = AppState.currentAudio.name;
-    }
-    renderAuditDashboard(res);
-    archiveAudit(res);
-    resetAudioInput();
-    toggleLoader(false);
-    setGlobalLock(false);
-    UI.tnp.panel.hidden = true;
 }
 
 async function pollJobStatus(jobId) {
@@ -499,6 +436,43 @@ function renderAuditDashboard(data) {
     const audit = data.audit || {};
     AppState.lastAudit = audit;
     AppState.hitlStatus = null;
+
+    // ── Audit provenance log ──────────────────────────────────────────
+    const auditSrc  = data.type === 'call' ? data.source : 'text_input';
+    const auditModel = data.audit_scored_by;
+    const _rawTier   = data.audit_tier;
+    const auditTier  = _rawTier === 'OR'  ? 'OR'
+                     : _rawTier === '!'   ? '!'
+                     : (_rawTier != null) ? `T${_rawTier}`
+                     : null;
+    // Exact provider from server (always set on both voice paths)
+    const transcriber = data.transcription_provider || data.source || null;
+
+    if (!auditModel)   console.warn('[Qualora] audit_scored_by missing from server response', data);
+    if (!transcriber && auditSrc !== 'text_input')
+                       console.warn('[Qualora] transcription_provider missing from server response', data);
+
+    const _srcLabel = auditSrc === 'text_input'    ? 'Chat / Text'
+                    : auditSrc === 'hf_space'       ? 'HF Space'
+                    : auditSrc === 'api_chain'       ? 'API Chain'
+                    : (auditSrc || 'voice');
+
+    console.groupCollapsed(`%c🟢 Qualora Audit — ${new Date().toLocaleTimeString()}`, 'color:#22c55e;font-weight:600');
+    console.log('%cInput mode   :', 'color:#94a3b8', auditSrc === 'text_input' ? 'Chat / Text' : `Voice (${_srcLabel})`);
+    if (auditSrc !== 'text_input') {
+        if (transcriber) console.log('%cTranscription:', 'color:#94a3b8', transcriber);
+    }
+    const _tierStr  = auditTier  ? `[${auditTier}]` : '[?]';
+    const _modelStr = auditModel || null;
+    if (_modelStr) console.log('%cJudge model  :', 'color:#94a3b8', `${_tierStr} ${_modelStr}`);
+    if (data.audit_attempted_summary) console.log('%cAttempted    :', 'color:#f59e0b', data.audit_attempted_summary);
+    const _f1  = data.audit?.agent_f1_score;
+    const _cmp = data.audit?.compliance_risk;
+    if (_f1  != null) console.log('%cF1 score     :', 'color:#94a3b8', _f1);
+    if (_cmp != null) console.log('%cCompliance   :', 'color:#94a3b8', _cmp);
+    console.log('%cFull payload :', 'color:#94a3b8', data);
+    console.groupEnd();
+    // ────────────────────────────────────────────────────────────
 
     // ── KPI Cards ────────────────────────────────────────────────────────
     let f1 = null;
@@ -1013,6 +987,12 @@ async function apiFetch(path, options = {}) {
 function toggleLoader(visible, msg = '') {
     UI.loaderText.textContent = msg;
     UI.overlayLoader.hidden = !visible;
+    if (!visible) {
+        // Reset fast-track visual for next use
+        UI.overlayLoader.classList.remove('fast-tracked');
+        const badge = document.getElementById('ft-badge');
+        if (badge) badge.hidden = true;
+    }
 }
 
 function notify(msg, type = 'info') {
@@ -1044,8 +1024,6 @@ async function verifyConnection() {
         const data = await res.json();
         UI.infoBar.classList.remove('status-offline');
         const st = $('#status-text');
-        AppState.isVercel = data.vercel_mode || false;
-
         if (data.api_ready) st.textContent = 'System: Ready';
         else st.textContent = 'System: Limited';
     } catch {
