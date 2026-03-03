@@ -319,13 +319,16 @@ async function processVoiceSignal() {
                     });
                     finishProcessCall(fastRes);
                 } catch (e) {
-                    if (e.name !== 'AbortError') {
-                        UI.tnp.status.textContent = 'API Chain Failed: ' + e.message;
-                    }
+                    if (e.name !== 'AbortError') throw e; // Bubble to outer catch
                 }
             };
 
-            UI.tnp.btn.onclick = () => triggerFallback('Fast-track activated');
+            UI.tnp.btn.onclick = () => triggerFallback('Fast-track activated').catch(e => {
+                notify('API Chain Failed: ' + e.message, 'error');
+                toggleLoader(false);
+                setGlobalLock(false);
+                UI.tnp.panel.hidden = true;
+            });
 
             try {
                 // Attempt standard waterfall (HF Space first!)
@@ -340,7 +343,7 @@ async function processVoiceSignal() {
                 if (e.name !== 'AbortError') {
                     // If Vercel physically cut off the connection with 504 Timeout, seamlessly catch it and fallback.
                     if (e.message.includes('504') || e.message.includes('Timeout')) {
-                        triggerFallback('Vercel Timeout intercepted');
+                        await triggerFallback('Vercel Timeout intercepted');
                     } else {
                         throw e; // Standard 500 error / unhandled issue
                     }
@@ -986,16 +989,14 @@ function riskClass(r) {
 async function apiFetch(path, options = {}) {
     const res = await fetch(`${API_BASE_URL}${path}`, options);
 
-    // Catch Vercel infrastructure timeouts directly before trying to parse HTML as JSON
-    if (res.status === 504) {
-        throw new Error('504 Gateway Timeout');
-    }
-
     let data;
     try {
         data = await res.json();
     } catch (e) {
-        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+        }
+        throw e;
     }
 
     if (!res.ok) throw new Error(data.error || 'Audit request failed.');

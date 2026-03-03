@@ -652,6 +652,10 @@ def generate_quality_audit(transcript: str, acoustic_profile: dict | None = None
             except Exception as e:
                 err_str = str(e).lower()
                 if "rate_limit" in err_str or "rate limit" in err_str or "429" in err_str:
+                    if IS_VERCEL:
+                        print(f"⚠️  [Audit] Groq Rate limit hit on Vercel. Skipping sleep retries to prevent 504 Timeout.")
+                        break
+                        
                     wait = 5 * (2 ** attempt)
                     print(f"⚠️  [Audit] Rate limit hit (attempt {attempt+1}). Waiting {wait}s...")
                     time.sleep(wait)
@@ -662,11 +666,9 @@ def generate_quality_audit(transcript: str, acoustic_profile: dict | None = None
                     break
 
     # ── OPENROUTER FALLBACK ──
-    # On Vercel (10s hard limit): use gpt-4o-mini (fastest small LLM) with 8s timeout.
-    # Locally: use Gemini Flash with full 45s timeout for best quality.
-    _or_model   = "openai/gpt-4o-mini"        if IS_VERCEL else "google/gemini-2.5-flash"
-    _or_timeout = 8                             if IS_VERCEL else 45
-    _or_tokens  = 1024                          if IS_VERCEL else 2048
+    _or_model   = "google/gemini-2.5-flash"
+    _or_timeout = 45
+    _or_tokens  = 2048
     print(f"--- [Audit] Attempting OpenRouter Fallback (model={_or_model}, timeout={_or_timeout}s) ---")
     try:
         import requests
