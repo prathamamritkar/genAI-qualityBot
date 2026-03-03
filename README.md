@@ -70,8 +70,7 @@ When a file is uploaded, an async job is spawned inside the Flask backend:
 The **first thread to successfully return a full transcript wins** and locks the job. Once resolved, the **LLM Auditor** kicks in, injecting acoustic context and the actual transcript into a structured prompt to ground textual evaluation in biometric reality.
 
 ### Workflow Sequence Diagram
-
-```mermaid
+'''
 sequenceDiagram
     participant UI as Browser (UI)
     participant API as Flask Backend
@@ -84,22 +83,24 @@ sequenceDiagram
     
     Note over API,EXT: Asynchronous Transcription Race starts
     
-    par Thread A: HF Space (free-tier)
+    par Thread A: HF Space (Free Tier)
         API->>HF: Stream audio file
-        HF->>HF: Run faster-whisper + pyannote + speechbrain
+        HF->>HF: Run faster-whisper + pyannote
         HF-->>API: Transcript + acoustic_profile
     and Thread B: API Fallback Chain
+        rect rgb(240, 240, 240)
         API->>EXT: Attempt ElevenLabs Scribe
-        alt ElevenLabs success
+        alt ElevenLabs Success
             EXT-->>API: Transcript received
-        else ElevenLabs failed
+        else ElevenLabs Failed
             API->>EXT: Attempt Deepgram Nova-2
-            alt Deepgram success
+            alt Deepgram Success
                 EXT-->>API: Transcript received
-            else Deepgram failed
-                API->>EXT: Attempt Groq (last fallback)
+            else Deepgram Failed
+                API->>EXT: Attempt Groq (Last Fallback)
                 EXT-->>API: Transcript received
             end
+        end
         end
     end
     
@@ -109,8 +110,7 @@ sequenceDiagram
     LLM-->>API: Audit matrix (JSON)
     
     Note over API: Job status marked DONE
-```
-
+'''
 ---
 
 ## 🛠️ Technology Stack
