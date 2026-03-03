@@ -33,6 +33,7 @@ const AppState = {
     isProcessing: false,
     lastAudit: null,
     hitlStatus: null,  // 'approved' | 'flagged' | 'rejected' | null
+    isVercel: false,   // Vercel disables async background jobs; fallback to sync endpoint
 };
 
 // ── DOM Shortcuts ──────────────────────────────────────────────────────────
@@ -178,7 +179,7 @@ function handleChatFile(file) {
     UI.chat.dropzone.hidden = true;
     UI.chat.chip.hidden = false;
     UI.chat.input.disabled = true;
-    UI.chat.input.placeholder = 'Document loaded — ready to audit.';
+    UI.chat.input.value = '';
     syncInteractiveState();
 }
 
@@ -188,7 +189,6 @@ function resetChatInput() {
     UI.chat.dropzone.hidden = false;
     UI.chat.chip.hidden = true;
     UI.chat.input.disabled = false;
-    UI.chat.input.placeholder = 'Paste chat log, support transcript, email thread, or any interaction text here...';
     syncInteractiveState();
 }
 
@@ -290,6 +290,25 @@ async function processVoiceSignal() {
     try {
         const formData = new FormData();
         formData.append('audio', AppState.currentAudio);
+
+        // Vercel is stateless and kills background threads, breaking the async polling pattern.
+        // It relies on the maxDuration synchronous endpoint.
+        if (AppState.isVercel) {
+            UI.tnp.status.hidden = false;
+            UI.tnp.status.textContent = 'Processing directly on Vercel Node...';
+            const res = await apiFetch('/process-call', { method: 'POST', body: formData });
+            if (AppState.currentAudio) {
+                res.localAudioUrl = URL.createObjectURL(AppState.currentAudio);
+                res.audioName = AppState.currentAudio.name;
+            }
+            renderAuditDashboard(res);
+            archiveAudit(res);
+            resetAudioInput();
+            toggleLoader(false);
+            setGlobalLock(false);
+            return;
+        }
+
         const res = await apiFetch('/start-call-audit', { method: 'POST', body: formData });
         currentJobId = res.job_id;
 
@@ -949,6 +968,8 @@ async function verifyConnection() {
         const data = await res.json();
         UI.infoBar.classList.remove('status-offline');
         const st = $('#status-text');
+        AppState.isVercel = data.vercel_mode || false;
+
         if (data.api_ready) st.textContent = 'Qualora Engine: Active';
         else st.textContent = 'Qualora Engine: Limited Mode';
     } catch {
