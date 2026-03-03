@@ -70,7 +70,7 @@ When a file is uploaded, an async job is spawned inside the Flask backend:
 The **first thread to successfully return a full transcript wins** and locks the job. Once resolved, the **LLM Auditor** kicks in, injecting acoustic context and the actual transcript into a structured prompt to ground textual evaluation in biometric reality.
 
 ### Workflow Sequence Diagram
-'''
+'''mermaid
 sequenceDiagram
     participant UI as Browser (UI)
     participant API as Flask Backend
